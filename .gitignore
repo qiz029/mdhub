@@ -1,0 +1,25 @@
+# Next.js build output
+.next/
+
+# Dependencies
+node_modules/
+
+# Environment files with secrets
+.env.local
+.env
+go-backend/.env
+
+# Go binaries
+go-backend/mdhub-go
+go-backend/mdhub-go-linux
+go-backend/logs/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo

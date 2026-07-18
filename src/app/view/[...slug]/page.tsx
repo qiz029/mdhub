@@ -1,0 +1,62 @@
+import path from "node:path";
+import { notFound } from "next/navigation";
+import { Nav } from "@/components/Nav";
+import { ViewerActions } from "@/components/ViewerActions";
+import { getPublishedFile } from "@/lib/vault";
+import { extractTitle, renderMarkdown } from "@/lib/markdown";
+
+export const dynamic = "force-dynamic";
+
+export default async function ViewPage({
+  params,
+}: {
+  params: Promise<{ slug: string[] }>;
+}) {
+  const { slug: segments } = await params;
+  const slug = segments.map((s) => decodeURIComponent(s)).join("/");
+  const file = await getPublishedFile(slug);
+
+  if (!file) {
+    return (
+      <div>
+        <Nav />
+        <main className="mx-auto max-w-2xl px-6 py-24 text-center">
+          <p className="text-xs uppercase tracking-widest text-stone-400">
+            404
+          </p>
+          <h1 className="mt-3 text-2xl font-semibold text-stone-900">
+            Not found or not published
+          </h1>
+          <p className="mt-3 text-stone-600">
+            This page doesn&apos;t exist or its frontmatter doesn&apos;t have{" "}
+            <code className="text-stone-400">publish: true</code>.
+          </p>
+        </main>
+      </div>
+    );
+  }
+
+  const fileDir = path.dirname(file.filePath);
+  const baseName = path.basename(slug);
+  const title = extractTitle(file.content, baseName);
+  const html = await renderMarkdown(file.content, fileDir);
+  const downloadName = path.basename(file.filePath);
+
+  return (
+    <div>
+      <Nav />
+      <main className="mx-auto w-full max-w-4xl xl:max-w-5xl px-4 sm:px-6 py-10">
+        <div className="mb-6 flex items-start justify-between gap-4">
+          <h1 className="text-3xl font-bold tracking-tight text-stone-900">
+            {title}
+          </h1>
+          <ViewerActions markdown={file.content} downloadName={downloadName} />
+        </div>
+        <article
+          className="prose-md text-stone-800"
+          dangerouslySetInnerHTML={{ __html: html }}
+        />
+      </main>
+    </div>
+  );
+}
