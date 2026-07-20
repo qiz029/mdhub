@@ -28,11 +28,6 @@ export function Nav() {
           </Link>
         </div>
         <SearchBar />
-        <nav className="flex items-center gap-4 text-sm text-stone-600 shrink-0">
-          <Link href="/" className="hover:text-stone-900">
-            Home
-          </Link>
-        </nav>
       </div>
     </header>
   );

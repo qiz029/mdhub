@@ -1,11 +1,20 @@
 import path from "node:path";
-import { notFound } from "next/navigation";
 import { Nav } from "@/components/Nav";
 import { ViewerActions } from "@/components/ViewerActions";
+import { ArticleComments } from "@/components/ArticleComments";
 import { getPublishedFile } from "@/lib/vault";
+import { getComments } from "@/lib/comments";
 import { extractTitle, renderMarkdown } from "@/lib/markdown";
 
 export const dynamic = "force-dynamic";
+
+function fmtDate(ms: number): string {
+  return new Date(ms).toLocaleString("zh-CN", {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+  });
+}
 
 export default async function ViewPage({
   params,
@@ -41,21 +50,32 @@ export default async function ViewPage({
   const title = extractTitle(file.content, baseName);
   const html = await renderMarkdown(file.content, fileDir);
   const downloadName = path.basename(file.filePath);
+  const comments = await getComments(slug);
 
   return (
     <div>
       <Nav />
-      <main className="mx-auto w-full max-w-4xl xl:max-w-5xl px-4 sm:px-6 py-10">
-        <div className="mb-6 flex items-start justify-between gap-4">
-          <h1 className="text-3xl font-bold tracking-tight text-stone-900">
-            {title}
-          </h1>
+      <main className="mx-auto w-full max-w-2xl px-5 sm:px-6 py-10">
+        <div className="mb-8 flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+          <div className="min-w-0">
+            <h1 className="text-2xl sm:text-3xl font-bold text-stone-900">
+              {title}
+            </h1>
+            <div className="mt-2.5 flex flex-wrap items-center gap-x-3 gap-y-1.5 text-xs text-stone-400">
+              <time>{fmtDate(file.publishedAt)}</time>
+              {file.tags.map((t) => (
+                <span
+                  key={t}
+                  className="rounded-full bg-stone-100 px-2 py-0.5 text-stone-500"
+                >
+                  #{t}
+                </span>
+              ))}
+            </div>
+          </div>
           <ViewerActions markdown={file.content} downloadName={downloadName} />
         </div>
-        <article
-          className="prose-md text-stone-800"
-          dangerouslySetInnerHTML={{ __html: html }}
-        />
+        <ArticleComments html={html} slug={slug} threads={comments} />
       </main>
     </div>
   );

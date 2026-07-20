@@ -25,6 +25,25 @@ async function* walkDir(dir: string): AsyncGenerator<string> {
   }
 }
 
+// Strip markdown syntax so feed excerpts read as plain text.
+function plainExcerpt(md: string, max = 200): string {
+  let s = md;
+  s = s.replace(/```[\s\S]*?```/g, " "); // fenced code
+  s = s.replace(/!\[[^\]]*\]\([^)]+\)/g, " "); // images
+  s = s.replace(/\[([^\]]*)\]\([^)]+\)/g, "$1"); // links -> text
+  s = s.replace(/^\s{0,3}#{1,6}\s+/gm, ""); // heading marks
+  s = s.replace(/^\s{0,3}>\s?/gm, ""); // blockquotes
+  s = s.replace(/^\s*[-*+]\s+/gm, ""); // unordered lists
+  s = s.replace(/^\s*\d+\.\s+/gm, ""); // ordered lists
+  s = s.replace(/^\s*[-*_]{3,}\s*$/gm, " "); // hr
+  s = s.replace(/\*\*([^*]+)\*\*/g, "$1"); // bold
+  s = s.replace(/\*([^*]+)\*/g, "$1"); // italic
+  s = s.replace(/`([^`]+)`/g, "$1"); // inline code
+  s = s.replace(/\|/g, " "); // table pipes
+  s = s.replace(/\s+/g, " ").trim();
+  return s.slice(0, max);
+}
+
 export async function listPublished(): Promise<PublishedEntry[]> {
   const results: PublishedEntry[] = [];
 
@@ -48,15 +67,13 @@ export async function listPublished(): Promise<PublishedEntry[]> {
 
         const source = slug.startsWith("_agent/") ? "agent" : "human";
 
-        const excerpt = content.replace(/\s+/g, " ").trim().slice(0, 200);
-
         results.push({
           slug,
           filePath,
           title,
           source,
           publishedAt: fileStat.mtimeMs,
-          excerpt,
+          excerpt: plainExcerpt(content),
         });
       } catch {
         // Skip unreadable files
@@ -70,9 +87,16 @@ export async function listPublished(): Promise<PublishedEntry[]> {
   return results;
 }
 
+export type PublishedFile = {
+  filePath: string;
+  content: string;
+  publishedAt: number;
+  tags: string[];
+};
+
 export async function getPublishedFile(
   slug: string,
-): Promise<{ filePath: string; content: string } | null> {
+): Promise<PublishedFile | null> {
   const cleanSlug = slug.replace(/\.\./g, "").replace(/\\/g, "/");
   const filePath = path.resolve(VAULT_PATH, `${cleanSlug}.md`);
 
@@ -89,7 +113,10 @@ export async function getPublishedFile(
 
     if (data.publish !== true) return null;
 
-    return { filePath, content: raw };
+    const fileStat = await stat(filePath);
+    const tags = Array.isArray(data.tags) ? data.tags.map(String) : [];
+
+    return { filePath, content: raw, publishedAt: fileStat.mtimeMs, tags };
   } catch {
     return null;
   }

@@ -21,6 +21,10 @@ function isAbsoluteUrl(href: string): boolean {
   );
 }
 
+function lazyImg(html: string): string {
+  return html.replace("<img ", '<img loading="lazy" ');
+}
+
 export async function renderMarkdown(
   md: string,
   fileDir: string,
@@ -30,13 +34,13 @@ export async function renderMarkdown(
 
   const origImage = renderer.image.bind(renderer);
   renderer.image = ({ href, title, text }: any) => {
-    if (!href) return origImage({ href: "", title, text } as any);
+    if (!href) return lazyImg(origImage({ href: "", title, text } as any));
     if (isAbsoluteUrl(href) || href.startsWith("/api/image")) {
-      return origImage({ href, title, text } as any);
+      return lazyImg(origImage({ href, title, text } as any));
     }
     const abs = path.isAbsolute(href) ? href : path.resolve(fileDir, href);
     const url = `/api/image?path=${encodeURIComponent(abs)}`;
-    return origImage({ href: url, title, text } as any);
+    return lazyImg(origImage({ href: url, title, text } as any));
   };
 
   marked.setOptions({ gfm: true, breaks: false });

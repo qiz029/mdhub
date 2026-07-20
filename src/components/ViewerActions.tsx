@@ -47,7 +47,7 @@ export function ViewerActions({
       <select
         value={font}
         onChange={(e) => setFont(e.target.value as FontPreset)}
-        className="rounded-md border border-stone-300 bg-white px-2 py-1.5 text-xs font-medium text-stone-600 hover:bg-stone-50 cursor-pointer appearance-none"
+        className="rounded-md border border-stone-300 bg-white px-2.5 py-2.5 text-sm font-medium text-stone-600 hover:bg-stone-50 cursor-pointer appearance-none"
       >
         {FONT_PRESETS.map((p) => (
           <option key={p.key} value={p.key}>
@@ -58,14 +58,14 @@ export function ViewerActions({
       <button
         type="button"
         onClick={copyMarkdown}
-        className="rounded-md border border-stone-300 bg-white px-3 py-1.5 text-xs font-medium text-stone-700 hover:bg-stone-50"
+        className="rounded-md border border-stone-300 bg-white px-4 py-2.5 text-sm font-medium text-stone-700 hover:bg-stone-50"
       >
         {copied ? "Copied!" : "Copy"}
       </button>
       <button
         type="button"
         onClick={downloadMarkdown}
-        className="rounded-md border border-stone-300 bg-white px-3 py-1.5 text-xs font-medium text-stone-700 hover:bg-stone-50"
+        className="rounded-md border border-stone-300 bg-white px-4 py-2.5 text-sm font-medium text-stone-700 hover:bg-stone-50"
       >
         Download
       </button>
