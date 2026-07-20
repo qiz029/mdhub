@@ -4,11 +4,14 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"html"
+	"io/fs"
 	"log"
 	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -43,6 +46,27 @@ type Document struct {
 	Score     float64  `json:"score,omitempty"`
 	Snippet   string   `json:"snippet,omitempty"`
 }
+
+// ---- in-memory search index ----
+//
+// Matching is done in-process rather than with PostgreSQL tsvector:
+// PG's default text search parser classifies CJK characters as "blank"
+// (space) whenever the platform libc doesn't report them as letters —
+// which is the case on macOS regardless of locale/provider, silently
+// emptying every tsvector and making Chinese search return nothing.
+// A vault is small (hundreds to low thousands of notes), so in-memory
+// substring matching over the plain text is simple, fast and portable.
+// PostgreSQL remains the store for documents/tags/backlinks.
+
+type searchEntry struct {
+	slug    string
+	title   string
+	plain   string // lowercased, for matching
+	display string // original plain text, for snippets
+	mtime   int64  // file mtime, ms
+}
+
+var searchIndex = map[string]*searchEntry{}
 
 // ---- main ----
 
@@ -94,18 +118,39 @@ func main() {
 
 // ---- vault scanner ----
 
+// scanVaultFiles walks the vault recursively, skipping hidden directories
+// and node_modules — same rules as the Next.js frontend.
+func scanVaultFiles() []string {
+	var files []string
+	root := filepath.Clean(vaultDir)
+	filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if d.IsDir() {
+			if p != root && (strings.HasPrefix(d.Name(), ".") || d.Name() == "node_modules") {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if strings.HasSuffix(d.Name(), ".md") {
+			files = append(files, p)
+		}
+		return nil
+	})
+	return files
+}
+
 func rescan() {
 	log.Printf("rescan starting, vault: %s", vaultDir)
-	files, err := filepath.Glob(vaultDir + "/*.md")
-	if err != nil {
-		log.Printf("scan error: %v", err)
-		return
-	}
+	files := scanVaultFiles()
+	log.Printf("scanning %d files...", len(files))
 
 	mu.Lock()
 	defer mu.Unlock()
 
-	log.Printf("scanning %d files...", len(files))
+	newIndex := make(map[string]*searchEntry, len(files))
+	seen := make(map[string]bool, len(files))
 	for _, fp := range files {
 		doc, err := parseFile(fp)
 		if err != nil {
@@ -116,8 +161,62 @@ func rescan() {
 			continue
 		}
 		upsert(doc)
+		seen[doc.Slug] = true
+		newIndex[doc.Slug] = &searchEntry{
+			slug:    doc.Slug,
+			title:   doc.Title,
+			plain:   strings.ToLower(doc.Content),
+			display: doc.Content,
+			mtime:   fileMtime(fp),
+		}
 	}
-	log.Printf("scan done")
+	searchIndex = newIndex
+	deleteStaleDocs(seen)
+	log.Printf("scan done, %d published docs indexed", len(newIndex))
+}
+
+func fileMtime(fp string) int64 {
+	if info, err := os.Stat(fp); err == nil {
+		return info.ModTime().UnixMilli()
+	}
+	return 0
+}
+
+// deleteStaleDocs removes rows whose files disappeared or are no longer
+// published, so results converge with the vault on disk.
+func deleteStaleDocs(seen map[string]bool) {
+	rows, err := db.Query("SELECT slug FROM documents")
+	if err != nil {
+		log.Printf("list slugs: %v", err)
+		return
+	}
+	var slugs []string
+	for rows.Next() {
+		var s string
+		if rows.Scan(&s) == nil {
+			slugs = append(slugs, s)
+		}
+	}
+	rows.Close()
+	for _, s := range slugs {
+		if !seen[s] {
+			deleteDoc(s)
+		}
+	}
+}
+
+// deleteDoc removes a document from PG (tags/backlinks cascade) and from
+// the in-memory index. Callers must hold mu.
+func deleteDoc(slug string) {
+	res, err := db.Exec("DELETE FROM documents WHERE slug=$1", slug)
+	if err != nil {
+		log.Printf("delete %s: %v", slug, err)
+		return
+	}
+	delete(searchIndex, slug)
+	if n, _ := res.RowsAffected(); n > 0 {
+		log.Printf("removed from index: %s", slug)
+	}
 }
 
 func parseFile(fp string) (*Document, error) {
@@ -155,7 +254,7 @@ func parseFile(fp string) (*Document, error) {
 		Slug:      slug,
 		FilePath:  fp,
 		Title:     title,
-		Content:   bigramText(plain),
+		Content:   plain,
 		WordCount: len([]rune(plain)),
 		Published: published,
 		Source:    source,
@@ -172,8 +271,8 @@ func fileSlug(fp string) string {
 		// fallback
 		return strings.TrimSuffix(filepath.Base(fp), ".md")
 	}
-	slug := filepath.ToSlash(rel)           // "translations/foo.md" or "_translations/foo.md"
-	slug = strings.TrimSuffix(slug, ".md")  // "translations/foo"
+	slug := filepath.ToSlash(rel)          // "translations/foo.md" or "_translations/foo.md"
+	slug = strings.TrimSuffix(slug, ".md") // "translations/foo"
 	return slug
 }
 
@@ -238,49 +337,98 @@ func resolveSlug(ref string) string {
 
 func handleSearch(w http.ResponseWriter, r *http.Request) {
 	q := strings.TrimSpace(r.URL.Query().Get("q"))
-	if q == "" {
+	terms := buildTerms(q)
+	if len(terms) == 0 {
 		writeJSON(w, []Document{})
 		return
 	}
 
-	// bigram the query
-	qBigram := bigramText(q)
+	type hit struct {
+		e     *searchEntry
+		score float64
+	}
 	mu.RLock()
-	defer mu.RUnlock()
-
-	rows, err := db.Query(`
-		SELECT slug, title, 
-			ts_rank(content_tsv, plainto_tsquery('simple', $1)) AS score,
-			ts_headline('simple', content, plainto_tsquery('simple', $1),
-				'MaxWords=40, MinWords=25, StartSel=<mark>, StopSel=</mark>') AS snippet
-		FROM documents
-		WHERE published=true AND content_tsv @@ plainto_tsquery('simple', $1)
-		ORDER BY score DESC
-		LIMIT 20`, qBigram)
-	if err != nil {
-		httpError(w, err, 500)
-		return
-	}
-	defer rows.Close()
-
-	var docs []Document
-	for rows.Next() {
-		var d Document
-		var score float64
-		var snippet sql.NullString
-		if err := rows.Scan(&d.Slug, &d.Title, &score, &snippet); err != nil {
-			continue
+	var hits []hit
+	for _, e := range searchIndex {
+		if score, ok := scoreEntry(e, terms); ok {
+			hits = append(hits, hit{e, score})
 		}
-		d.Score = score
-		if snippet.Valid {
-			d.Snippet = snippet.String
-		}
-		docs = append(docs, d)
 	}
-	if docs == nil {
-		docs = []Document{}
+	mu.RUnlock()
+
+	sort.Slice(hits, func(i, j int) bool {
+		if hits[i].score != hits[j].score {
+			return hits[i].score > hits[j].score
+		}
+		return hits[i].e.mtime > hits[j].e.mtime
+	})
+	if len(hits) > 20 {
+		hits = hits[:20]
+	}
+
+	docs := make([]Document, 0, len(hits))
+	for _, h := range hits {
+		docs = append(docs, Document{
+			Slug:    h.e.slug,
+			Title:   h.e.title,
+			Score:   h.score,
+			Snippet: makeSnippet(h.e.display, terms),
+		})
 	}
 	writeJSON(w, docs)
+}
+
+// buildTerms converts a raw query into match terms: CJK text is expanded
+// into unigram+bigram tokens, everything is lowercased. A document matches
+// only when it contains every term.
+func buildTerms(q string) []string {
+	return strings.Fields(strings.ToLower(bigramText(q)))
+}
+
+func scoreEntry(e *searchEntry, terms []string) (float64, bool) {
+	lowerTitle := strings.ToLower(e.title)
+	var score float64
+	for _, t := range terms {
+		body := strings.Count(e.plain, t)
+		title := strings.Count(lowerTitle, t)
+		if body+title == 0 {
+			return 0, false
+		}
+		score += float64(body) + 5*float64(title)
+	}
+	return score, true
+}
+
+// makeSnippet returns an HTML-escaped excerpt around the first occurrence
+// of the longest (most specific) term, with that term wrapped in <mark>.
+func makeSnippet(content string, terms []string) string {
+	key := ""
+	for _, t := range terms {
+		if len(t) > len(key) {
+			key = t
+		}
+	}
+	idx := strings.Index(strings.ToLower(content), key)
+	if idx < 0 {
+		idx = 0
+	}
+	runes := []rune(content)
+	start := utf8.RuneCountInString(content[:idx]) - 40
+	if start < 0 {
+		start = 0
+	}
+	end := start + 160
+	if end > len(runes) {
+		end = len(runes)
+	}
+	window := string(runes[start:end])
+	rel := strings.Index(strings.ToLower(window), key)
+	if rel < 0 {
+		return html.EscapeString(window)
+	}
+	return html.EscapeString(window[:rel]) + "<mark>" +
+		html.EscapeString(window[rel:rel+len(key)]) + "</mark>" +
+		html.EscapeString(window[rel+len(key):])
 }
 
 func handleTags(w http.ResponseWriter, r *http.Request) {
@@ -601,34 +749,50 @@ func watchVault() {
 	known := map[string]time.Time{}
 
 	for range ticker.C {
-		files, err := filepath.Glob(vaultDir + "/*.md")
-		if err != nil {
-			continue
-		}
-		changed := false
+		files := scanVaultFiles()
+		current := make(map[string]bool, len(files))
 		for _, fp := range files {
+			current[fp] = true
 			info, err := os.Stat(fp)
 			if err != nil {
 				continue
 			}
 			prev, exists := known[fp]
-			if !exists || info.ModTime().After(prev) {
-				known[fp] = info.ModTime()
-				changed = true
-				doc, err := parseFile(fp)
-				if err != nil {
-					continue
-				}
-				if doc.Published {
-					mu.Lock()
-					upsert(doc)
-					mu.Unlock()
-					log.Printf("updated: %s", doc.Slug)
-				}
+			if exists && !info.ModTime().After(prev) {
+				continue
 			}
+			known[fp] = info.ModTime()
+
+			doc, err := parseFile(fp)
+			if err != nil {
+				continue
+			}
+			mu.Lock()
+			if doc.Published {
+				upsert(doc)
+				searchIndex[doc.Slug] = &searchEntry{
+					slug:    doc.Slug,
+					title:   doc.Title,
+					plain:   strings.ToLower(doc.Content),
+					display: doc.Content,
+					mtime:   fileMtime(fp),
+				}
+				log.Printf("updated: %s", doc.Slug)
+			} else {
+				// publish removed (or file unparsable as frontmatter):
+				// drop from the index so stale notes stop showing up
+				deleteDoc(doc.Slug)
+			}
+			mu.Unlock()
 		}
-		if changed {
-			log.Println("vault change detected, reindexed")
+		// files deleted from disk
+		for fp := range known {
+			if !current[fp] {
+				delete(known, fp)
+				mu.Lock()
+				deleteDoc(fileSlug(fp))
+				mu.Unlock()
+			}
 		}
 	}
 }

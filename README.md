@@ -11,13 +11,13 @@ A self-hosted, local-first markdown publishing system. Reads an Obsidian vault f
 └─────────────────┘              │ client-side fetch
                                  ▼
                         ┌──────────────────┐
-                        │  Go API (10002)   │  ← Full-text search (bigram)
-                        │  PostgreSQL       │
+                        │  Go API (10002)   │  ← In-memory search (CJK bigram)
+                        │  PostgreSQL       │  ← tags / backlinks store
                         └──────────────────┘
 ```
 
 - **Frontend**: Next.js 16 (App Router) — scans vault filesystem, renders markdown, serves local images
-- **Search backend**: Go binary — Chinese bigram tokenizer, PostgreSQL full-text search, file watcher
+- **Search backend**: Go binary — recursive vault scanner, in-memory bigram search, file watcher; PostgreSQL stores tags/backlinks
 - **No database required** for basic use; search needs PostgreSQL
 
 ## Quick Start
@@ -82,7 +82,7 @@ The home page lists all published notes, newest first. Each gets a URL at `/view
 
 - **Filesystem-first**: Vault is the source of truth. No upload, no database sync needed for reading.
 - **Frontmatter-driven**: `publish: true` controls visibility; `tags` enable filtering.
-- **Chinese search**: Bigram tokenizer + PostgreSQL tsvector — handles CJK text well.
+- **Chinese search**: In-memory bigram matching — handles CJK text well on any platform. (PostgreSQL's tsvector silently drops CJK characters on macOS, so matching happens in the Go process instead.)
 - **Local images**: Vault-relative image paths served through `/api/image`.
 - **Font presets**: 6 Chinese font options (system, serif, kai, hei, wenkai, fangsong).
 - **⌘K search**: Fuzzy full-text search with inline snippets.

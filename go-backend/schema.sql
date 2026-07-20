@@ -1,5 +1,10 @@
 -- MDHub search backend – PostgreSQL schema
 -- Run: psql -d mdhub -f schema.sql
+--
+-- Note: /api/search matches in-process (Go memory), not via tsvector —
+-- PG's text search parser treats CJK as whitespace on macOS. The
+-- content_tsv column + trigger below are kept for compatibility but are
+-- no longer used by the search path.
 
 CREATE TABLE IF NOT EXISTS documents (
     slug        TEXT PRIMARY KEY,
