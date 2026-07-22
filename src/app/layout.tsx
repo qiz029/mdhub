@@ -7,14 +7,31 @@ export const metadata: Metadata = {
   description: "Markdown sharing and viewing",
 };
 
+// Apply stored reader prefs (theme / font / size / width) before first paint
+// to avoid a flash of the default light, narrow, system-font rendering.
+const BOOTSTRAP = `(function(){try{
+var t=localStorage.getItem("mdhub-theme")||"system";
+if(t==="dark"||(t==="system"&&window.matchMedia("(prefers-color-scheme: dark)").matches)){
+document.documentElement.classList.add("dark");}
+var f=localStorage.getItem("mdhub-font");
+if(f)document.documentElement.classList.add("font-"+f);
+var sizes={sm:"0.9375rem",md:"1.0625rem",lg:"1.1875rem",xl:"1.3125rem"};
+var s=sizes[localStorage.getItem("mdhub-font-size")||""];
+if(s)document.documentElement.style.setProperty("--reader-font-size",s);
+var widths={narrow:"36rem",normal:"42rem",wide:"56rem",full:"none"};
+var w=widths[localStorage.getItem("mdhub-width")||""];
+if(w)document.documentElement.style.setProperty("--reader-width",w);
+}catch(e){}})();`;
+
 export default function RootLayout({
   children,
 }: {
   children: React.ReactNode;
 }) {
   return (
-    <html lang="en">
+    <html lang="en" suppressHydrationWarning>
       <body className="min-h-screen bg-white text-stone-900 antialiased">
+        <script dangerouslySetInnerHTML={{ __html: BOOTSTRAP }} />
         <FontProvider>{children}</FontProvider>
       </body>
     </html>

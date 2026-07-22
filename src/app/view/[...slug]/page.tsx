@@ -2,6 +2,7 @@ import path from "node:path";
 import { Nav } from "@/components/Nav";
 import { ViewerActions } from "@/components/ViewerActions";
 import { ArticleComments } from "@/components/ArticleComments";
+import { ReaderSettings } from "@/components/ReaderSettings";
 import { getPublishedFile } from "@/lib/vault";
 import { getComments } from "@/lib/comments";
 import { extractTitle, renderMarkdown } from "@/lib/markdown";
@@ -55,7 +56,10 @@ export default async function ViewPage({
   return (
     <div>
       <Nav />
-      <main className="mx-auto w-full max-w-2xl px-5 sm:px-6 py-10">
+      <main
+        className="mx-auto w-full px-5 sm:px-6 py-10"
+        style={{ maxWidth: "var(--reader-width, 42rem)" }}
+      >
         <div className="mb-8 flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
           <div className="min-w-0">
             <h1 className="text-2xl sm:text-3xl font-bold text-stone-900">
@@ -77,6 +81,7 @@ export default async function ViewPage({
         </div>
         <ArticleComments html={html} slug={slug} threads={comments} />
       </main>
+      <ReaderSettings />
     </div>
   );
 }

@@ -1,7 +1,6 @@
 "use client";
 
 import { useState } from "react";
-import { useFont, FONT_PRESETS, type FontPreset } from "@/components/FontProvider";
 
 export function ViewerActions({
   markdown,
@@ -11,7 +10,6 @@ export function ViewerActions({
   downloadName: string;
 }) {
   const [copied, setCopied] = useState(false);
-  const { font, setFont } = useFont();
 
   async function copyMarkdown() {
     try {
@@ -44,17 +42,6 @@ export function ViewerActions({
 
   return (
     <div className="flex shrink-0 items-center gap-2">
-      <select
-        value={font}
-        onChange={(e) => setFont(e.target.value as FontPreset)}
-        className="rounded-md border border-stone-300 bg-white px-2.5 py-2.5 text-sm font-medium text-stone-600 hover:bg-stone-50 cursor-pointer appearance-none"
-      >
-        {FONT_PRESETS.map((p) => (
-          <option key={p.key} value={p.key}>
-            {p.label}
-          </option>
-        ))}
-      </select>
       <button
         type="button"
         onClick={copyMarkdown}

@@ -1,8 +1,64 @@
 @import "tailwindcss";
 
+/* ---- Claude-inspired warm palette (light) ---- */
+@theme {
+  --color-stone-50: #faf9f6;
+  --color-stone-100: #f3f1ea;
+  --color-stone-200: #e7e4da;
+  --color-stone-300: #d5d1c4;
+  --color-stone-400: #a5a292;
+  --color-stone-500: #757165;
+  --color-stone-600: #57544a;
+  --color-stone-700: #45423b;
+  --color-stone-800: #2f2d29;
+  --color-stone-900: #211f1c;
+}
+
 :root {
-  --background: #fafaf9;
-  --foreground: #1c1917;
+  color-scheme: light;
+  --background: #faf9f6;
+  --foreground: #211f1c;
+  --accent: #c15f3c;
+  --accent-strong: #a84e2f;
+  --border-subtle: #e7e4da;
+  --code-bg: #f3f1ea;
+  --pre-bg: #262421;
+  --quote-text: #57544a;
+  --quote-border: #d5d1c4;
+  --comment-bg: rgba(193, 95, 60, 0.08);
+  --draft-highlight: rgba(217, 151, 87, 0.4);
+}
+
+/* Dark mode: flip the stone scale so every stone-* utility inverts. */
+.dark {
+  color-scheme: dark;
+  --background: #1e1d1b;
+  --foreground: #eeece4;
+  --accent: #d97757;
+  --accent-strong: #e5926f;
+  --border-subtle: #3a3833;
+  --code-bg: #2b2925;
+  --pre-bg: #171614;
+  --quote-text: #b3afa3;
+  --quote-border: #4b4942;
+  --comment-bg: rgba(217, 151, 87, 0.12);
+  --draft-highlight: rgba(217, 151, 87, 0.35);
+
+  --color-stone-50: #1e1d1b;
+  --color-stone-100: #292724;
+  --color-stone-200: #3a3833;
+  --color-stone-300: #4b4942;
+  --color-stone-400: #918d81;
+  --color-stone-500: #b3afa3;
+  --color-stone-600: #cbc7bb;
+  --color-stone-700: #dfdbcf;
+  --color-stone-800: #ebe8e0;
+  --color-stone-900: #f5f3ed;
+  --color-white: #26241f;
+
+  --color-amber-100: #3d3324;
+  --color-amber-400: #d9a05f;
+  --color-amber-700: #d9a05f;
 }
 
 @theme inline {
@@ -100,28 +156,32 @@ body {
   font-family: "FangSong", "STFangsong", "Noto Serif CJK SC", Georgia, "Times New Roman", serif;
 }
 
+.prose-md {
+  font-size: var(--reader-font-size, 1.0625rem);
+  line-height: 1.85;
+}
 .prose-md h1 {
-  font-size: 2rem;
+  font-size: 1.88em;
   font-weight: 700;
   margin-top: 1.5rem;
   margin-bottom: 1rem;
   line-height: 1.2;
 }
 .prose-md h2 {
-  font-size: 1.5rem;
+  font-size: 1.41em;
   font-weight: 700;
   margin-top: 2rem;
   margin-bottom: 0.75rem;
   line-height: 1.3;
 }
 .prose-md h3 {
-  font-size: 1.25rem;
+  font-size: 1.18em;
   font-weight: 600;
   margin-top: 1.5rem;
   margin-bottom: 0.5rem;
 }
 .prose-md h4 {
-  font-size: 1.05rem;
+  font-size: 0.99em;
   font-weight: 600;
   margin-top: 1.25rem;
   margin-bottom: 0.5rem;
@@ -129,8 +189,6 @@ body {
 .prose-md p {
   margin-top: 0.9rem;
   margin-bottom: 0.9rem;
-  font-size: 1.0625rem;
-  line-height: 1.85;
 }
 .prose-md ul {
   list-style: disc;
@@ -147,34 +205,33 @@ body {
 .prose-md li {
   margin-top: 0.3rem;
   margin-bottom: 0.3rem;
-  font-size: 1.0625rem;
-  line-height: 1.8;
 }
 .prose-md a {
-  color: #1d4ed8;
+  color: var(--accent);
   text-decoration: underline;
   text-underline-offset: 2px;
 }
 .prose-md a:hover {
-  color: #1e40af;
+  color: var(--accent-strong);
 }
 .prose-md blockquote {
-  border-left: 3px solid #d6d3d1;
+  border-left: 3px solid var(--quote-border);
   padding-left: 1rem;
   margin: 1rem 0;
-  color: #57534e;
+  color: var(--quote-text);
   font-style: italic;
 }
 .prose-md code {
-  background: #f5f5f4;
+  background: var(--code-bg);
   padding: 0.15rem 0.35rem;
   border-radius: 0.25rem;
   font-size: 0.9em;
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
 }
 .prose-md pre {
-  background: #1c1917;
-  color: #fafaf9;
+  background: var(--pre-bg);
+  color: #f5f3ed;
+  border: 1px solid var(--border-subtle);
   padding: 1rem;
   border-radius: 0.5rem;
   overflow-x: auto;
@@ -205,33 +262,39 @@ body {
 }
 .prose-md th,
 .prose-md td {
-  border: 1px solid #e7e5e4;
+  border: 1px solid var(--border-subtle);
   padding: 0.5rem 0.75rem;
   text-align: left;
 }
 .prose-md th {
-  background: #f5f5f4;
+  background: var(--code-bg);
   font-weight: 600;
 }
 .prose-md hr {
   border: 0;
-  border-top: 1px solid #e7e5e4;
+  border-top: 1px solid var(--border-subtle);
   margin: 2rem 0;
 }
 
 /* ---- Inline comments ---- */
+::selection {
+  background: var(--draft-highlight);
+}
+::highlight(mdhub-draft) {
+  background-color: var(--draft-highlight);
+}
 .mdhub-has-comment {
-  background: #fffbeb;
+  background: var(--comment-bg);
   border-radius: 0.375rem;
 }
 .mdhub-comment-marker {
   margin-left: 0.5rem;
   font-size: 0.75rem;
-  color: #b45309;
+  color: var(--accent);
   cursor: pointer;
   white-space: nowrap;
 }
 .mdhub-comment-marker:hover {
-  color: #92400e;
+  color: var(--accent-strong);
   text-decoration: underline;
 }

@@ -179,6 +179,22 @@ export function ArticleComments({
     anchor: DraftAnchor;
   } | null>(null);
   const draftAnchor = useRef<DraftAnchor | null>(null);
+  const draftRange = useRef<Range | null>(null);
+
+  // Keep the selected text visually highlighted while the draft form is open
+  // (native selection is lost as soon as the textarea takes focus).
+  function showDraftHighlight() {
+    if (typeof Highlight === "undefined" || !CSS.highlights) return;
+    if (!draftRange.current) return;
+    CSS.highlights.set("mdhub-draft", new Highlight(draftRange.current));
+  }
+
+  function clearDraftHighlight() {
+    if (typeof CSS === "undefined" || !CSS.highlights) return;
+    CSS.highlights.delete("mdhub-draft");
+  }
+
+  useEffect(() => () => clearDraftHighlight(), []);
 
   // (Re)anchor threads into the article DOM: highlight the block, append a
   // marker chip, and insert a slot element the thread portal renders into.
@@ -254,6 +270,7 @@ export function ArticleComments({
             : "",
       };
       const rect = sel.getRangeAt(0).getBoundingClientRect();
+      draftRange.current = sel.getRangeAt(0).cloneRange();
       setSelBtn({ x: rect.left + rect.width / 2, y: rect.bottom + 6 });
       return true;
     }
@@ -305,6 +322,7 @@ export function ArticleComments({
     setOpenId(id);
     setDraft(null);
     setSelBtn(null);
+    clearDraftHighlight();
     window.getSelection()?.removeAllRanges();
   }
 
@@ -351,6 +369,7 @@ export function ArticleComments({
             if (draftAnchor.current) {
               setDraft({ ...selBtn, anchor: draftAnchor.current });
               setSelBtn(null);
+              showDraftHighlight();
             }
           }}
         >
@@ -369,7 +388,10 @@ export function ArticleComments({
           <CommentForm
             submitLabel="发布"
             onSubmit={submitDraft}
-            onCancel={() => setDraft(null)}
+            onCancel={() => {
+              clearDraftHighlight();
+              setDraft(null);
+            }}
           />
         </div>
       )}

@@ -3,6 +3,15 @@
 import { createContext, useContext, useState, useEffect, type ReactNode } from "react";
 
 export type FontPreset = "system" | "serif" | "kai" | "hei" | "wenkai" | "fangsong";
+export type FontSize = "sm" | "md" | "lg" | "xl";
+export type ContentWidth = "narrow" | "normal" | "wide" | "full";
+export type ThemeMode = "light" | "dark" | "system";
+
+export const THEME_MODES: { key: ThemeMode; label: string }[] = [
+  { key: "light", label: "浅色" },
+  { key: "dark", label: "深色" },
+  { key: "system", label: "自动" },
+];
 
 export const FONT_PRESETS: { key: FontPreset; label: string }[] = [
   { key: "system", label: "系统默认" },
@@ -13,18 +22,31 @@ export const FONT_PRESETS: { key: FontPreset; label: string }[] = [
   { key: "fangsong", label: "仿宋" },
 ];
 
-const STORAGE_KEY = "mdhub-font";
+export const FONT_SIZES: { key: FontSize; label: string; value: string }[] = [
+  { key: "sm", label: "小", value: "0.9375rem" },
+  { key: "md", label: "标准", value: "1.0625rem" },
+  { key: "lg", label: "大", value: "1.1875rem" },
+  { key: "xl", label: "特大", value: "1.3125rem" },
+];
 
-function readStored(): FontPreset {
-  if (typeof window === "undefined") return "system";
-  return (localStorage.getItem(STORAGE_KEY) as FontPreset) || "system";
+export const CONTENT_WIDTHS: { key: ContentWidth; label: string; value: string }[] = [
+  { key: "narrow", label: "窄", value: "36rem" },
+  { key: "normal", label: "标准", value: "42rem" },
+  { key: "wide", label: "宽", value: "56rem" },
+  { key: "full", label: "全宽", value: "none" },
+];
+
+const FONT_KEY = "mdhub-font";
+const SIZE_KEY = "mdhub-font-size";
+const WIDTH_KEY = "mdhub-width";
+const THEME_KEY = "mdhub-theme";
+
+function readStored<T extends string>(key: string, fallback: T): T {
+  if (typeof window === "undefined") return fallback;
+  return (localStorage.getItem(key) as T) || fallback;
 }
 
-function writeStored(preset: FontPreset) {
-  localStorage.setItem(STORAGE_KEY, preset);
-}
-
-function applyClass(preset: FontPreset) {
+function applyFont(preset: FontPreset) {
   const root = document.documentElement;
   root.classList.remove(
     "font-system",
@@ -37,12 +59,45 @@ function applyClass(preset: FontPreset) {
   root.classList.add(`font-${preset}`);
 }
 
-type FontCtx = {
+function applyFontSize(size: FontSize) {
+  const preset = FONT_SIZES.find((s) => s.key === size) || FONT_SIZES[1];
+  document.documentElement.style.setProperty("--reader-font-size", preset.value);
+}
+
+function applyWidth(width: ContentWidth) {
+  const preset = CONTENT_WIDTHS.find((w) => w.key === width) || CONTENT_WIDTHS[1];
+  document.documentElement.style.setProperty("--reader-width", preset.value);
+}
+
+function applyTheme(mode: ThemeMode) {
+  const dark =
+    mode === "dark" ||
+    (mode === "system" &&
+      window.matchMedia("(prefers-color-scheme: dark)").matches);
+  document.documentElement.classList.toggle("dark", dark);
+}
+
+type ReaderCtx = {
   font: FontPreset;
   setFont: (f: FontPreset) => void;
+  fontSize: FontSize;
+  setFontSize: (s: FontSize) => void;
+  contentWidth: ContentWidth;
+  setContentWidth: (w: ContentWidth) => void;
+  theme: ThemeMode;
+  setTheme: (t: ThemeMode) => void;
 };
 
-const Ctx = createContext<FontCtx>({ font: "system", setFont: () => {} });
+const Ctx = createContext<ReaderCtx>({
+  font: "system",
+  setFont: () => {},
+  fontSize: "md",
+  setFontSize: () => {},
+  contentWidth: "normal",
+  setContentWidth: () => {},
+  theme: "system",
+  setTheme: () => {},
+});
 
 export function useFont() {
   return useContext(Ctx);
@@ -50,18 +105,70 @@ export function useFont() {
 
 export function FontProvider({ children }: { children: ReactNode }) {
   const [font, setFontState] = useState<FontPreset>("system");
+  const [fontSize, setFontSizeState] = useState<FontSize>("md");
+  const [contentWidth, setContentWidthState] = useState<ContentWidth>("normal");
+  const [theme, setThemeState] = useState<ThemeMode>("system");
 
   useEffect(() => {
-    const stored = readStored();
-    setFontState(stored);
-    applyClass(stored);
+    const storedFont = readStored(FONT_KEY, "system");
+    const storedSize = readStored(SIZE_KEY, "md");
+    const storedWidth = readStored(WIDTH_KEY, "normal");
+    const storedTheme = readStored(THEME_KEY, "system");
+    setFontState(storedFont);
+    setFontSizeState(storedSize);
+    setContentWidthState(storedWidth);
+    setThemeState(storedTheme);
+    applyFont(storedFont);
+    applyFontSize(storedSize);
+    applyWidth(storedWidth);
+    applyTheme(storedTheme);
+
+    const mq = window.matchMedia("(prefers-color-scheme: dark)");
+    const onSystemChange = () => {
+      if (readStored(THEME_KEY, "system") === "system") applyTheme("system");
+    };
+    mq.addEventListener("change", onSystemChange);
+    return () => mq.removeEventListener("change", onSystemChange);
   }, []);
 
   function setFont(next: FontPreset) {
     setFontState(next);
-    writeStored(next);
-    applyClass(next);
+    localStorage.setItem(FONT_KEY, next);
+    applyFont(next);
   }
 
-  return <Ctx.Provider value={{ font, setFont }}>{children}</Ctx.Provider>;
+  function setFontSize(next: FontSize) {
+    setFontSizeState(next);
+    localStorage.setItem(SIZE_KEY, next);
+    applyFontSize(next);
+  }
+
+  function setContentWidth(next: ContentWidth) {
+    setContentWidthState(next);
+    localStorage.setItem(WIDTH_KEY, next);
+    applyWidth(next);
+  }
+
+  function setTheme(next: ThemeMode) {
+    setThemeState(next);
+    localStorage.setItem(THEME_KEY, next);
+    applyTheme(next);
+  }
+
+  return (
+    <Ctx.Provider
+      value={{
+        font,
+        setFont,
+        fontSize,
+        setFontSize,
+        contentWidth,
+        setContentWidth,
+        theme,
+        setTheme,
+      }}
+    >
+      {children}
+    </Ctx.Provider>
+  );
 }
