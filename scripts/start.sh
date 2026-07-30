@@ -1,6 +1,6 @@
 #!/bin/bash
 # Production start script for MDHub Next.js app.
-# Usage: set MDHUB_VAULT_PATH in .env.local, then run this script.
+# Usage: set MDHUB_API_URL in .env.local, then run this script.
 # Typically invoked by launchd or systemd.
 
 set -a
