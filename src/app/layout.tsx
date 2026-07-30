@@ -30,6 +30,13 @@ export default function RootLayout({
 }) {
   return (
     <html lang="en" suppressHydrationWarning>
+      <head>
+        {/* On-demand webfont for the .font-wenkai reader preset (LXGW WenKai) */}
+        <link
+          rel="stylesheet"
+          href="https://cdn.jsdelivr.net/npm/lxgw-wenkai-webfont@1.7.0/style.css"
+        />
+      </head>
       <body className="min-h-screen bg-white text-stone-900 antialiased">
         <script dangerouslySetInnerHTML={{ __html: BOOTSTRAP }} />
         <FontProvider>{children}</FontProvider>

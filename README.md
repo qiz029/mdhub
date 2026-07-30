@@ -1,63 +1,114 @@
 # Markdown Hub
 
-A self-hosted, local-first markdown publishing system. Reads an Obsidian vault from the filesystem, serves notes with `publish: true` in YAML frontmatter as a web feed — like a family Obsidian Publish, but local.
+A self-hosted, database-centric markdown publishing system. Notes live in PostgreSQL — documents, images, and comments — and are served as a web feed. Content gets in through a plain HTTP write API (built for agents and scripts), or via a one-shot import of an existing Obsidian vault. No runtime dependency on Obsidian or the filesystem.
 
 ## Architecture
 
 ```
-┌─────────────────┐     ┌──────────────────┐
-│  Obsidian Vault │────▶│  Next.js (10001)  │  ← Markdown feed + viewer
-│  (filesystem)   │     └────────┬─────────┘
-└─────────────────┘              │ client-side fetch
-                                 ▼
-                        ┌──────────────────┐
-                        │  Go API (10002)   │  ← In-memory search (CJK bigram)
-                        │  PostgreSQL       │  ← tags / backlinks store
-                        └──────────────────┘
+┌─────────────────┐   one-shot import   ┌──────────────────┐
+│  Obsidian Vault │ ──────────────────▶ │  Go API (10002)   │
+│  (optional)     │   mdhub-go -import  │  PostgreSQL       │ ← documents / images / comments
+└─────────────────┘                     │                   │    (single source of truth)
+┌─────────────────┐   PUT markdown      │                   │
+│  Agents/scripts │ ──────────────────▶ │                   │
+└─────────────────┘                     └────────┬─────────┘
+                                                 │ server-side fetch
+                                        ┌────────▼─────────┐
+                                        │  Next.js (10001)  │ ← Markdown feed + viewer
+                                        └──────────────────┘
 ```
 
-- **Frontend**: Next.js 16 (App Router) — scans vault filesystem, renders markdown, serves local images
-- **Search backend**: Go binary — recursive vault scanner, in-memory bigram search, file watcher; PostgreSQL stores tags/backlinks
-- **No database required** for basic use; search needs PostgreSQL
+- **Database**: PostgreSQL — the single source of truth (documents with raw markdown, images as bytea, tags, backlinks, comment threads)
+- **API backend**: Go binary — owns all DB access, document write API, in-memory CJK bigram search, LLM categorization, image and comment endpoints
+- **Frontend**: Next.js 16 (App Router) — fetches everything from the Go API server-side, renders markdown, proxies images
 
 ## Quick Start
 
-### 1. Frontend
+### 1. Database
 
 ```bash
-cp .env.example .env.local
-# Edit .env.local: set MDHUB_VAULT_PATH to your Obsidian vault
-npm install
-npm run dev        # → http://localhost:10001/mdhub
+createdb mdhub
+psql -d mdhub -f go-backend/schema.sql   # create tables
 ```
 
-### 2. Search backend (optional)
+### 2. API backend
 
 ```bash
 cd go-backend
 cp .env.example .env
-# Edit .env: set MDHUB_VAULT and MDHUB_PG
-psql -d mdhub -f schema.sql   # create tables
+# Edit .env: set MDHUB_PG
 go build -o mdhub-go .
+
+# Optional: one-shot import of an existing vault (documents + images + comments);
+# pass the vault ROOT — slugs stay vault-relative, e.g. "_translations/notes/foo":
+./mdhub-go -import "/path/to/Obsidian Vault"
+
 ./mdhub-go                     # → http://localhost:10002
 ```
 
-Then set `NEXT_PUBLIC_SEARCH_API=http://localhost:10002` in the frontend's `.env.local`.
+### 3. Frontend
+
+```bash
+cp .env.example .env.local
+# Edit .env.local if MDHUB_API_URL differs
+npm install
+npm run dev        # → http://localhost:10001/mdhub
+```
+
+### 4. Optional: local semantic search (CPU)
+
+```bash
+brew install ollama && brew services start ollama
+ollama pull qwen3-embedding:0.6b
+# In go-backend/.env: MDHUB_EMBED_URL="http://localhost:11434", restart the backend, then:
+curl -X POST http://localhost:10002/api/reembed   # backfill existing notes
+```
 
 ## Publishing a note
 
-Add to any `.md` file in your vault:
+The primary way to publish is the write API — agents and scripts upload raw markdown directly, no filesystem involved:
+
+```bash
+# Create or update a note (body is the full raw markdown; slug is chosen by the caller):
+curl -X PUT --data-binary @note.md http://localhost:10002/api/documents/translations/note
+
+# Delete:
+curl -X DELETE http://localhost:10002/api/documents/translations/note
+```
+
+A note is publicly visible when its frontmatter has `publish: true`:
 
 ```yaml
 ---
 title: My Note
 publish: true
-date: 2025-01-01
 tags: [foo, bar]
+category: 菜谱/家常   # optional: pins the tree-sidebar location, wins over LLM
 ---
 ```
 
-The home page lists all published notes, newest first. Each gets a URL at `/view/<vault-relative-path>/`.
+The server parses the frontmatter, derives the plain-text excerpt and word count, updates tags/backlinks, and (if an LLM key is configured) queues the note for tree categorization — all on the write, so reads stay cheap.
+
+The one-shot vault import (`-import`, above) also works as a bulk-publish path: it is idempotent, so re-running it after editing notes in Obsidian upserts only what changed.
+
+The home page lists all published notes, newest first. Each gets a URL at `/view/<slug>/`.
+
+## API overview (Go backend, :10002)
+
+| Endpoint | Description |
+|---|---|
+| `GET /api/documents` | Published notes (slug, title, excerpt, updated) |
+| `GET /api/documents/{slug}` | One note incl. `raw_content`, tags, backlinks |
+| `PUT /api/documents/{slug}` | Create/update from raw markdown body |
+| `DELETE /api/documents/{slug}` | Delete note (tags/backlinks/comments cascade) |
+| `GET /api/search?q=` | Full-text search with snippets (CJK bigram, in-memory) |
+| `GET /api/tags` · `GET /api/tags?tag=` | Tag counts / notes per tag |
+| `GET /api/backlinks/{slug}` | Notes linking to a slug |
+| `GET /api/images?path=` | Image binary stored in PG |
+| `GET/POST /api/documents/{slug}/comments` | Anchored comment threads |
+| `POST /api/reindex` | Rebuild the in-memory search index from PG |
+| `POST /api/reclassify` | Queue LLM classification for published notes with no category yet |
+| `POST /api/reembed` | Queue embedding computation for all published notes |
 
 ## Environment Variables
 
@@ -65,7 +116,7 @@ The home page lists all published notes, newest first. Each gets a URL at `/view
 
 | Variable | Default | Description |
 |---|---|---|
-| `MDHUB_VAULT_PATH` | `~/Documents/Obsidian Vault` | Path to Obsidian vault |
+| `MDHUB_API_URL` | `http://localhost:10002` | Go API base URL (server-side) |
 | `MDHUB_PUBLIC_BASE_URL` | `http://localhost:10001/mdhub` | Public base URL |
 | `NEXT_PUBLIC_SEARCH_API` | `http://localhost:10002` | Search backend URL (browser → Go) |
 | `NEXT_PUBLIC_HEARTH_URL` | _(unset)_ | Optional "back to Hearth" link |
@@ -74,18 +125,33 @@ The home page lists all published notes, newest first. Each gets a URL at `/view
 
 | Variable | Default | Description |
 |---|---|---|
-| `MDHUB_VAULT` | `~/Documents/Obsidian Vault/_translations` | Path to markdown files |
 | `MDHUB_PG` | `postgres://mdhub:***@localhost:5432/mdhub` | PostgreSQL DSN |
 | `MDHUB_LISTEN` | `:10002` | Listen address |
+| `MDHUB_LLM_BASE_URL` | `https://api.openai.com/v1` | OpenAI-compatible chat API base |
+| `MDHUB_LLM_API_KEY` | _(unset = disabled)_ | LLM API key |
+| `MDHUB_LLM_MODEL` | `gpt-4o-mini` | LLM model for categorization |
+| `MDHUB_EMBED_URL` | _(unset = disabled)_ | Embedding API base, e.g. `http://localhost:11434` (Ollama) |
+| `MDHUB_EMBED_MODEL` | `qwen3-embedding:0.6b` | Embedding model for semantic search |
 
 ## Features
 
-- **Filesystem-first**: Vault is the source of truth. No upload, no database sync needed for reading.
+- **Database-first**: PostgreSQL is the source of truth. The vault filesystem is only read once, by the importer.
 - **Frontmatter-driven**: `publish: true` controls visibility; `tags` enable filtering.
-- **Chinese search**: In-memory bigram matching — handles CJK text well on any platform. (PostgreSQL's tsvector silently drops CJK characters on macOS, so matching happens in the Go process instead.)
-- **Local images**: Vault-relative image paths served through `/api/image`.
+- **Hybrid search**: In-memory CJK bigram keyword matching (PostgreSQL's tsvector silently drops CJK on macOS) blended with local embedding semantics — optionally powered by Qwen3-Embedding-0.6B via Ollama on CPU, so "怎么烹饪猪肉" can find a 红烧肉 note with no literal overlap. Disabled when `MDHUB_EMBED_URL` is unset.
+- **Images in PG**: Image binaries are imported into the database and served through `/api/images`.
+- **Anchored comments**: Readers select text to comment on; threads are stored in PG and shown beside the article.
+- **Tree sidebar**: The home page has a filesystem-style sidebar — drill down level by level, with a breadcrumb bar on top.
+- **LLM semantic categories**: Optionally, an OpenAI-compatible LLM organizes published notes into a category tree that drives the sidebar. The algorithm works like a B-tree: each note descends from the root into the best-fitting folder, and any node with more than 10 direct children is split — the LLM reads the full text of that node's notes and proposes named groups. All work is local to the affected node (no global recomputation), async on write only, never on the read path; degrades to plain directory grouping when no API key is set. Frontmatter `category:` pins a note manually (never moved by splits) and always wins. Rebuild the whole tree with `POST /api/reclassify`.
 - **Font presets**: 6 Chinese font options (system, serif, kai, hei, wenkai, fangsong).
 - **⌘K search**: Fuzzy full-text search with inline snippets.
+
+## Migrating from the filesystem version
+
+If you ran MDHub when it read the vault directly:
+
+1. Apply the new schema (note: it is **not** compatible with the v1 tables — recreate the database or `DROP TABLE documents, tags, document_tags, backlinks` first).
+2. Run the import: `./mdhub-go -import "/path/to/Obsidian Vault"` — this imports all notes (published flag preserved), image files, and `_comments/*.md` threads. The import is idempotent; re-running overwrites in place.
+3. Remove `MDHUB_VAULT_PATH` / `MDHUB_VAULT` from your env files.
 
 ## Production deploy
 

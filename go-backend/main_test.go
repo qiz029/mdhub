@@ -96,3 +96,72 @@ func TestScanVaultFilesRecursive(t *testing.T) {
 		}
 	}
 }
+
+const sampleComments = `---
+note: notes/travel
+---
+
+## 用户 · 2026-07-20 21:30
+<!-- {"id":"k3x9ab","quote":"路线包括大理","prefix":"前文","suffix":"后文"} -->
+住宿定了吗？
+
+## Hermes · 2026-07-20 21:45
+<!-- {"reply":"k3x9ab"} -->
+今晚看。
+
+## 用户 · 2026-07-21 09:05
+<!-- {"reply":"no-such-thread"} -->
+孤儿回复应被丢弃
+
+## 路人 · 2026-07-21 10:00
+没有 meta 的 section 应被丢弃
+`
+
+func TestParseCommentThreads(t *testing.T) {
+	threads := parseCommentThreads(sampleComments)
+	if len(threads) != 1 {
+		t.Fatalf("parseCommentThreads = %d threads, want 1", len(threads))
+	}
+	th := threads[0]
+	if th.id != "k3x9ab" || th.quote != "路线包括大理" || th.prefix != "前文" || th.suffix != "后文" {
+		t.Errorf("thread anchor wrong: %+v", th)
+	}
+	if len(th.entries) != 2 {
+		t.Fatalf("thread has %d entries, want 2 (opening + reply)", len(th.entries))
+	}
+	if th.entries[0].author != "用户" || th.entries[0].text != "住宿定了吗？" {
+		t.Errorf("opening entry wrong: %+v", th.entries[0])
+	}
+	if th.entries[1].author != "Hermes" || th.entries[1].text != "今晚看。" {
+		t.Errorf("reply entry wrong: %+v", th.entries[1])
+	}
+}
+
+func TestParseCommentSectionTime(t *testing.T) {
+	secs := parseCommentSections(sampleComments)
+	if len(secs) == 0 {
+		t.Fatal("no sections parsed")
+	}
+	got := secs[0].at.Format("2006-01-02 15:04")
+	if got != "2026-07-20 21:30" {
+		t.Errorf("section time = %q, want %q", got, "2026-07-20 21:30")
+	}
+}
+
+func TestCommentSlug(t *testing.T) {
+	dir := t.TempDir()
+	old := vaultDir
+	vaultDir = dir
+	defer func() { vaultDir = old }()
+
+	// frontmatter note: wins
+	fp := filepath.Join(dir, "_comments", "whatever.md")
+	if got := commentSlug(fp, "---\nnote: notes/travel\n---\n"); got != "notes/travel" {
+		t.Errorf("commentSlug frontmatter = %q, want notes/travel", got)
+	}
+	// otherwise derive from path relative to _comments/
+	fp = filepath.Join(dir, "_comments", "translations", "foo.md")
+	if got := commentSlug(fp, "no frontmatter"); got != "translations/foo" {
+		t.Errorf("commentSlug path = %q, want translations/foo", got)
+	}
+}
