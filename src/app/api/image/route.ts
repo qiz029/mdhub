@@ -1,55 +1,34 @@
 import { NextRequest } from "next/server";
-import { readFile, stat } from "node:fs/promises";
-import path from "node:path";
-import { VAULT_PATH } from "@/lib/config";
+import { API_URL } from "@/lib/config";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-const MIME: Record<string, string> = {
-  ".png": "image/png",
-  ".jpg": "image/jpeg",
-  ".jpeg": "image/jpeg",
-  ".gif": "image/gif",
-  ".webp": "image/webp",
-  ".svg": "image/svg+xml",
-  ".bmp": "image/bmp",
-  ".avif": "image/avif",
-  ".ico": "image/x-icon",
-};
-
+// Pure proxy: forwards vault-relative image keys to the Go backend.
 export async function GET(req: NextRequest) {
   const url = new URL(req.url);
-  const raw = url.searchParams.get("path");
-  if (!raw) return new Response("missing path", { status: 400 });
-
-  const abs = path.resolve(raw);
-  const ext = path.extname(abs).toLowerCase();
-  if (!MIME[ext]) {
-    return new Response("unsupported type", { status: 400 });
-  }
-
-  // Security: only serve images inside the vault
-  if (
-    !abs.startsWith(VAULT_PATH + path.sep) &&
-    abs !== VAULT_PATH
-  ) {
-    return new Response("forbidden", { status: 403 });
+  const key = url.searchParams.get("path");
+  if (!key || key.includes("..")) {
+    return new Response("bad path", { status: 400 });
   }
 
   try {
-    const s = await stat(abs);
-    if (!s.isFile()) return new Response("not a file", { status: 404 });
-    const buf = await readFile(abs);
-    return new Response(buf, {
-      status: 200,
-      headers: {
-        "Content-Type": MIME[ext],
-        "Cache-Control": "private, max-age=300",
-        "Content-Length": String(buf.byteLength),
-      },
+    const upstream = await fetch(
+      `${API_URL}/api/images?path=${encodeURIComponent(key)}`,
+      { cache: "no-store" },
+    );
+    const headers = new Headers();
+    const contentType = upstream.headers.get("Content-Type");
+    if (contentType) headers.set("Content-Type", contentType);
+    headers.set(
+      "Cache-Control",
+      upstream.headers.get("Cache-Control") || "private, max-age=300",
+    );
+    return new Response(upstream.body, {
+      status: upstream.status,
+      headers,
     });
   } catch {
-    return new Response("not found", { status: 404 });
+    return new Response("upstream unavailable", { status: 502 });
   }
 }

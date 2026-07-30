@@ -72,8 +72,26 @@ body {
   color: var(--foreground);
   font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
     "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-  overflow-x: hidden;
-  width: 100%;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+/* Visible keyboard-focus indicator everywhere (dark mode follows --accent). */
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 0.25rem;
+}
+
+/* Unresolved [[wiki links]] render as inert dashed text. */
+.mdhub-dead-link {
+  color: var(--color-stone-400);
+  text-decoration: underline;
+  text-decoration-style: dashed;
+  text-underline-offset: 2px;
+  cursor: default;
 }
 
 /* ---- Font presets ---- */
@@ -174,6 +192,10 @@ body {
   margin-bottom: 0.75rem;
   line-height: 1.3;
 }
+.prose-md h2,
+.prose-md h3 {
+  scroll-margin-top: 1.5rem;
+}
 .prose-md h3 {
   font-size: 1.18em;
   font-weight: 600;
@@ -250,6 +272,18 @@ body {
   border-radius: 0.5rem;
   margin: 1rem 0;
   display: block;
+}
+.prose-md figure {
+  margin: 1rem 0;
+}
+.prose-md figure img {
+  margin: 0 auto;
+}
+.prose-md figcaption {
+  text-align: center;
+  font-size: 0.85rem;
+  color: var(--quote-text);
+  margin-top: 0.4rem;
 }
 .prose-md table {
   width: 100%;

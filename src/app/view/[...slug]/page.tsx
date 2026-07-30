@@ -1,9 +1,12 @@
 import path from "node:path";
+import Link from "next/link";
 import { Nav } from "@/components/Nav";
 import { ViewerActions } from "@/components/ViewerActions";
 import { ArticleComments } from "@/components/ArticleComments";
 import { ReaderSettings } from "@/components/ReaderSettings";
-import { getPublishedFile } from "@/lib/vault";
+import { TableOfContents } from "@/components/TableOfContents";
+import { CodeCopy } from "@/components/CodeCopy";
+import { getPublishedFile, listPublished, type PublishedEntry } from "@/lib/vault";
 import { getComments } from "@/lib/comments";
 import { extractTitle, renderMarkdown } from "@/lib/markdown";
 
@@ -15,6 +18,37 @@ function fmtDate(ms: number): string {
     month: "short",
     day: "numeric",
   });
+}
+
+// Obsidian-style wiki-link resolution: exact slug first, then note name
+// (last slug segment, case-insensitive), then title (case-insensitive).
+function makeLinkResolver(
+  entries: PublishedEntry[],
+): (target: string) => string | null {
+  const bySlug = new Map(entries.map((e) => [e.slug, e.slug]));
+  const byName = new Map<string, string>();
+  const byTitle = new Map<string, string>();
+  for (const e of entries) {
+    const name = path.posix.basename(e.slug).toLowerCase();
+    if (!byName.has(name)) byName.set(name, e.slug);
+    const title = e.title.toLowerCase();
+    if (!byTitle.has(title)) byTitle.set(title, e.slug);
+  }
+  return (target) => {
+    if (bySlug.has(target)) return bySlug.get(target)!;
+    const lower = target.toLowerCase();
+    return byName.get(lower) ?? byTitle.get(lower) ?? null;
+  };
+}
+
+function viewHref(slug: string): string {
+  return (
+    "/view/" +
+    slug
+      .split("/")
+      .map((s) => encodeURIComponent(s))
+      .join("/")
+  );
 }
 
 export default async function ViewPage({
@@ -46,16 +80,28 @@ export default async function ViewPage({
     );
   }
 
-  const fileDir = path.dirname(file.filePath);
-  const baseName = path.basename(slug);
+  const slugDir = path.posix.dirname(slug);
+  const fileDir = slugDir === "." ? "" : slugDir;
+  const baseName = path.posix.basename(slug);
   const title = extractTitle(file.content, baseName);
-  const html = await renderMarkdown(file.content, fileDir);
-  const downloadName = path.basename(file.filePath);
+  const entries = await listPublished();
+  const { html, toc } = await renderMarkdown(
+    file.content,
+    fileDir,
+    makeLinkResolver(entries),
+  );
+  const downloadName = baseName + ".md";
   const comments = await getComments(slug);
+
+  // entries are newest-first: prev = newer article, next = older article
+  const idx = entries.findIndex((e) => e.slug === slug);
+  const prev = idx > 0 ? entries[idx - 1] : null;
+  const next = idx >= 0 && idx < entries.length - 1 ? entries[idx + 1] : null;
 
   return (
     <div>
       <Nav />
+      <TableOfContents items={toc} />
       <main
         className="mx-auto w-full px-5 sm:px-6 py-10"
         style={{ maxWidth: "var(--reader-width, 42rem)" }}
@@ -80,6 +126,35 @@ export default async function ViewPage({
           <ViewerActions markdown={file.content} downloadName={downloadName} />
         </div>
         <ArticleComments html={html} slug={slug} threads={comments} />
+        <CodeCopy />
+        <nav className="mt-10 flex items-start justify-between gap-4 border-t border-stone-100 pt-6">
+          <div className="min-w-0 flex-1">
+            {prev && (
+              <Link
+                href={viewHref(prev.slug)}
+                className="group block text-sm text-stone-500 hover:text-stone-800"
+              >
+                <span className="text-xs text-stone-400">← 上一篇</span>
+                <span className="mt-1 block truncate font-medium">
+                  {prev.title}
+                </span>
+              </Link>
+            )}
+          </div>
+          <div className="min-w-0 flex-1 text-right">
+            {next && (
+              <Link
+                href={viewHref(next.slug)}
+                className="group block text-sm text-stone-500 hover:text-stone-800"
+              >
+                <span className="text-xs text-stone-400">下一篇 →</span>
+                <span className="mt-1 block truncate font-medium">
+                  {next.title}
+                </span>
+              </Link>
+            )}
+          </div>
+        </nav>
       </main>
       <ReaderSettings />
     </div>

@@ -3,28 +3,30 @@ package main
 import (
 	"database/sql"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"html"
+	"io"
 	"io/fs"
 	"log"
+	"math/rand/v2"
 	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
-	"sort"
 	"strings"
 	"sync"
 	"time"
 	"unicode"
 	"unicode/utf8"
 
-	_ "github.com/lib/pq"
+	"github.com/lib/pq"
 )
 
 // ---- config ----
 
 var (
-	vaultDir   = getEnv("MDHUB_VAULT", mustHome()+"/Documents/Obsidian Vault/_translations")
+	vaultDir   string // only used by the one-shot `-import` command
 	pgDSN      = getEnv("MDHUB_PG", "postgres://mdhub:mdhub@localhost:5432/mdhub?sslmode=disable")
 	listenAddr = getEnv("MDHUB_LISTEN", ":10002")
 	db         *sql.DB
@@ -34,17 +36,21 @@ var (
 // ---- Document ----
 
 type Document struct {
-	Slug      string   `json:"slug"`
-	FilePath  string   `json:"file_path"`
-	Title     string   `json:"title"`
-	Content   string   `json:"content"`
-	WordCount int      `json:"word_count"`
-	Published bool     `json:"published"`
-	Source    string   `json:"source"`
-	Tags      []string `json:"tags"`
-	Backlinks []string `json:"backlinks,omitempty"`
-	Score     float64  `json:"score,omitempty"`
-	Snippet   string   `json:"snippet,omitempty"`
+	Slug           string   `json:"slug"`
+	FilePath       string   `json:"file_path"`
+	Title          string   `json:"title"`
+	Content        string   `json:"content"`
+	RawContent     string   `json:"raw_content,omitempty"`
+	Excerpt        string   `json:"excerpt,omitempty"`
+	WordCount      int      `json:"word_count"`
+	Published      bool     `json:"published"`
+	Source         string   `json:"source"`
+	CategoryPath   string   `json:"category"`
+	CategoryManual bool     `json:"category_manual,omitempty"`
+	Tags           []string `json:"tags"`
+	Backlinks      []string `json:"backlinks,omitempty"`
+	Score          float64  `json:"score,omitempty"`
+	Snippet        string   `json:"snippet,omitempty"`
 }
 
 // ---- in-memory search index ----
@@ -71,6 +77,9 @@ var searchIndex = map[string]*searchEntry{}
 // ---- main ----
 
 func main() {
+	importDir := flag.String("import", "", "one-shot import of a vault directory into Postgres, then exit")
+	flag.Parse()
+
 	defer func() {
 		if r := recover(); r != nil {
 			log.Printf("PANIC: %v", r)
@@ -92,21 +101,36 @@ func main() {
 	}
 	log.Println("connected to postgres")
 
-	// initial index — run async so HTTP starts immediately
-	go func() {
-		rescan()
-	}()
+	if *importDir != "" {
+		startClassifier()
+		startEmbedder()
+		runImport(*importDir)
+		waitClassify()
+		waitEmbed()
+		return
+	}
 
-	// start fsnotify watcher
-	go watchVault()
+	// build the in-memory search index from Postgres (the single store)
+	loadIndexFromDB()
+	loadEmbeddingsFromDB()
+
+	// background LLM categorization worker (no-op without an API key)
+	startClassifier()
+
+	// background embedding worker (no-op without MDHUB_EMBED_URL)
+	startEmbedder()
 
 	// HTTP API
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/search", handleSearch)
 	mux.HandleFunc("/api/tags", handleTags)
 	mux.HandleFunc("/api/backlinks/", handleBacklinks)
+	mux.HandleFunc("/api/documents", handleDocumentList)
 	mux.HandleFunc("/api/documents/", handleDocument)
+	mux.HandleFunc("/api/images", handleImage)
 	mux.HandleFunc("/api/reindex", handleReindex)
+	mux.HandleFunc("/api/reclassify", handleReclassify)
+	mux.HandleFunc("/api/reembed", handleReembed)
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(200)
 		w.Write([]byte("ok"))
@@ -116,7 +140,7 @@ func main() {
 	log.Fatal(http.ListenAndServe(listenAddr, mux))
 }
 
-// ---- vault scanner ----
+// ---- vault scanner (used by the import command only) ----
 
 // scanVaultFiles walks the vault recursively, skipping hidden directories
 // and node_modules — same rules as the Next.js frontend.
@@ -141,72 +165,35 @@ func scanVaultFiles() []string {
 	return files
 }
 
-func rescan() {
-	log.Printf("rescan starting, vault: %s", vaultDir)
-	files := scanVaultFiles()
-	log.Printf("scanning %d files...", len(files))
-
-	mu.Lock()
-	defer mu.Unlock()
-
-	newIndex := make(map[string]*searchEntry, len(files))
-	seen := make(map[string]bool, len(files))
-	for _, fp := range files {
-		doc, err := parseFile(fp)
-		if err != nil {
-			log.Printf("parse %s: %v", fp, err)
-			continue
-		}
-		if !doc.Published {
-			continue
-		}
-		upsert(doc)
-		seen[doc.Slug] = true
-		newIndex[doc.Slug] = &searchEntry{
-			slug:    doc.Slug,
-			title:   doc.Title,
-			plain:   strings.ToLower(doc.Content),
-			display: doc.Content,
-			mtime:   fileMtime(fp),
-		}
-	}
-	searchIndex = newIndex
-	deleteStaleDocs(seen)
-	log.Printf("scan done, %d published docs indexed", len(newIndex))
-}
-
-func fileMtime(fp string) int64 {
-	if info, err := os.Stat(fp); err == nil {
-		return info.ModTime().UnixMilli()
-	}
-	return 0
-}
-
-// deleteStaleDocs removes rows whose files disappeared or are no longer
-// published, so results converge with the vault on disk.
-func deleteStaleDocs(seen map[string]bool) {
-	rows, err := db.Query("SELECT slug FROM documents")
+// loadIndexFromDB rebuilds the in-memory search index from all published
+// documents stored in Postgres.
+func loadIndexFromDB() {
+	rows, err := db.Query("SELECT slug, title, content, file_mtime FROM documents WHERE published=true")
 	if err != nil {
-		log.Printf("list slugs: %v", err)
+		log.Printf("load index: %v", err)
 		return
 	}
-	var slugs []string
+	defer rows.Close()
+
+	newIndex := map[string]*searchEntry{}
 	for rows.Next() {
-		var s string
-		if rows.Scan(&s) == nil {
-			slugs = append(slugs, s)
+		var e searchEntry
+		var mtime time.Time
+		if err := rows.Scan(&e.slug, &e.title, &e.display, &mtime); err != nil {
+			continue
 		}
+		e.plain = strings.ToLower(e.display)
+		e.mtime = mtime.UnixMilli()
+		newIndex[e.slug] = &e
 	}
-	rows.Close()
-	for _, s := range slugs {
-		if !seen[s] {
-			deleteDoc(s)
-		}
-	}
+	mu.Lock()
+	searchIndex = newIndex
+	mu.Unlock()
+	log.Printf("index loaded, %d published docs", len(newIndex))
 }
 
-// deleteDoc removes a document from PG (tags/backlinks cascade) and from
-// the in-memory index. Callers must hold mu.
+// deleteDoc removes a document from PG (tags/backlinks/comments cascade)
+// and from the in-memory index. Callers must hold mu.
 func deleteDoc(slug string) {
 	res, err := db.Exec("DELETE FROM documents WHERE slug=$1", slug)
 	if err != nil {
@@ -214,8 +201,9 @@ func deleteDoc(slug string) {
 		return
 	}
 	delete(searchIndex, slug)
+	delete(embedIndex, slug)
 	if n, _ := res.RowsAffected(); n > 0 {
-		log.Printf("removed from index: %s", slug)
+		log.Printf("removed: %s", slug)
 	}
 }
 
@@ -224,11 +212,16 @@ func parseFile(fp string) (*Document, error) {
 	if err != nil {
 		return nil, err
 	}
-	content := string(raw)
+	return parseDoc(fileSlug(fp), fp, string(raw)), nil
+}
 
-	fm, body := splitFrontmatter(content)
+// parseDoc derives title/tags/published/plain content/word_count/excerpt
+// from raw markdown (frontmatter included).
+func parseDoc(slug, filePath, raw string) *Document {
+	fm, body := splitFrontmatter(raw)
 	published := false
 	source := "user"
+	category := ""
 	var tags []string
 
 	for _, line := range strings.Split(fm, "\n") {
@@ -240,33 +233,52 @@ func parseFile(fp string) (*Document, error) {
 			source = strings.TrimSpace(strings.TrimPrefix(line, "source:"))
 			source = strings.Trim(source, "\"")
 		}
+		if strings.HasPrefix(line, "category:") {
+			category = strings.TrimSpace(strings.TrimPrefix(line, "category:"))
+			category = sanitizeCategory(strings.Trim(category, "\""))
+		}
 		if strings.HasPrefix(line, "tags:") {
 			tags = parseTags(line)
 		}
 	}
 
-	title := extractTitle(body, filepath.Base(fp))
+	fallback := filePath
+	if fallback == "" {
+		fallback = slug
+	}
+	title := extractTitle(body, filepath.Base(fallback))
 	plain := stripMarkdown(body)
 
-	slug := fileSlug(fp)
-
 	return &Document{
-		Slug:      slug,
-		FilePath:  fp,
-		Title:     title,
-		Content:   plain,
-		WordCount: len([]rune(plain)),
-		Published: published,
-		Source:    source,
-		Tags:      tags,
-		Backlinks: extractBacklinks(body),
-	}, nil
+		Slug:           slug,
+		FilePath:       filePath,
+		Title:          title,
+		Content:        plain,
+		RawContent:     raw,
+		Excerpt:        excerptOf(plain),
+		WordCount:      len([]rune(plain)),
+		Published:      published,
+		Source:         source,
+		CategoryPath:   category,
+		CategoryManual: category != "",
+		Tags:           tags,
+		Backlinks:      extractBacklinks(body),
+	}
+}
+
+// excerptOf returns the first 200 runes of plain text.
+func excerptOf(plain string) string {
+	r := []rune(plain)
+	if len(r) > 200 {
+		r = r[:200]
+	}
+	return string(r)
 }
 
 func fileSlug(fp string) string {
-	// Compute slug relative to Obsidian vault root so MDHub can resolve it
-	vaultRoot := filepath.Dir(vaultDir) // e.g. ~/Documents/Obsidian Vault
-	rel, err := filepath.Rel(vaultRoot, fp)
+	// Slug is relative to the vault root (the -import dir), matching the
+	// old frontend's VAULT_PATH semantics: "_translations/notes/foo".
+	rel, err := filepath.Rel(vaultDir, fp)
 	if err != nil {
 		// fallback
 		return strings.TrimSuffix(filepath.Base(fp), ".md")
@@ -287,14 +299,18 @@ func upsert(doc *Document) {
 	defer tx.Rollback()
 
 	_, err = tx.Exec(`
-		INSERT INTO documents (slug, file_path, title, content, word_count, published, source, file_mtime)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,now())
+		INSERT INTO documents (slug, file_path, title, content, raw_content, excerpt, word_count, published, source, category_path, category_manual, file_mtime)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,now())
 		ON CONFLICT (slug) DO UPDATE SET
 			title=EXCLUDED.title, content=EXCLUDED.content,
+			raw_content=EXCLUDED.raw_content, excerpt=EXCLUDED.excerpt,
 			word_count=EXCLUDED.word_count, published=EXCLUDED.published,
-			source=EXCLUDED.source, file_mtime=now()`,
-		doc.Slug, doc.FilePath, doc.Title, doc.Content,
-		doc.WordCount, doc.Published, doc.Source)
+			source=EXCLUDED.source,
+			category_manual=EXCLUDED.category_manual,
+			category_path = CASE WHEN EXCLUDED.category_path <> '' THEN EXCLUDED.category_path WHEN documents.category_manual AND NOT EXCLUDED.category_manual THEN '' ELSE documents.category_path END,
+			file_mtime=now()`,
+		doc.Slug, doc.FilePath, doc.Title, doc.Content, doc.RawContent,
+		doc.Excerpt, doc.WordCount, doc.Published, doc.Source, doc.CategoryPath, doc.CategoryManual)
 	if err != nil {
 		log.Printf("upsert doc %s: %v", doc.Slug, err)
 		return
@@ -343,38 +359,58 @@ func handleSearch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	type hit struct {
-		e     *searchEntry
-		score float64
-	}
+	// keyword hits (bigram substring matching)
 	mu.RLock()
-	var hits []hit
-	for _, e := range searchIndex {
+	kwScores := map[string]float64{}
+	mtimes := map[string]int64{}
+	for slug, e := range searchIndex {
+		mtimes[slug] = e.mtime
 		if score, ok := scoreEntry(e, terms); ok {
-			hits = append(hits, hit{e, score})
+			kwScores[slug] = score
 		}
 	}
 	mu.RUnlock()
 
-	sort.Slice(hits, func(i, j int) bool {
-		if hits[i].score != hits[j].score {
-			return hits[i].score > hits[j].score
+	// semantic side: embed the query sentence; failures degrade to pure
+	// keyword results (queryVec stays nil)
+	var queryVec []float32
+	if embedBaseURL != "" {
+		client := &http.Client{Timeout: 8 * time.Second}
+		if v, err := embedText(client, q); err != nil {
+			log.Printf("search embed: %v", err)
+		} else {
+			queryVec = v
 		}
-		return hits[i].e.mtime > hits[j].e.mtime
-	})
-	if len(hits) > 20 {
-		hits = hits[:20]
 	}
+
+	mu.RLock()
+	hits := mergeHits(kwScores, queryVec, embedIndex, mtimes)
 
 	docs := make([]Document, 0, len(hits))
 	for _, h := range hits {
+		e := searchIndex[h.slug]
+		if e == nil {
+			continue
+		}
+		snippet := ""
+		if h.kw {
+			snippet = makeSnippet(e.display, terms)
+		} else {
+			// pure semantic hit: plain escaped excerpt, no <mark>
+			runes := []rune(e.display)
+			if len(runes) > 160 {
+				runes = runes[:160]
+			}
+			snippet = html.EscapeString(string(runes))
+		}
 		docs = append(docs, Document{
-			Slug:    h.e.slug,
-			Title:   h.e.title,
+			Slug:    e.slug,
+			Title:   e.title,
 			Score:   h.score,
-			Snippet: makeSnippet(h.e.display, terms),
+			Snippet: snippet,
 		})
 	}
+	mu.RUnlock()
 	writeJSON(w, docs)
 }
 
@@ -524,26 +560,113 @@ func handleBacklinks(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, docs)
 }
 
-func handleDocument(w http.ResponseWriter, r *http.Request) {
-	slug := strings.TrimPrefix(r.URL.Path, "/api/documents/")
-	slug = strings.TrimSuffix(slug, "/")
-	if slug == "" {
-		writeJSON(w, []Document{})
+// ---- documents API ----
+
+type docListItem struct {
+	Slug         string   `json:"slug"`
+	Title        string   `json:"title"`
+	Excerpt      string   `json:"excerpt"`
+	CategoryPath string   `json:"category"`
+	Tags         []string `json:"tags"`
+	Updated      int64    `json:"updated"` // file_mtime, Unix ms
+}
+
+// handleDocumentList serves GET /api/documents — published docs, newest first.
+func handleDocumentList(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		httpError(w, fmt.Errorf("method not allowed"), 405)
 		return
 	}
+	rows, err := db.Query(`
+		SELECT d.slug, d.title, d.excerpt, d.file_mtime, d.category_path,
+			COALESCE(array_agg(dt.tag ORDER BY dt.tag) FILTER (WHERE dt.tag IS NOT NULL), '{}')
+		FROM documents d
+		LEFT JOIN document_tags dt ON dt.slug = d.slug
+		WHERE d.published=true
+		GROUP BY d.slug, d.title, d.excerpt, d.file_mtime, d.category_path
+		ORDER BY d.file_mtime DESC`)
+	if err != nil {
+		httpError(w, err, 500)
+		return
+	}
+	defer rows.Close()
 
+	items := []docListItem{}
+	for rows.Next() {
+		var it docListItem
+		var mtime time.Time
+		var tags []string
+		if err := rows.Scan(&it.Slug, &it.Title, &it.Excerpt, &mtime, &it.CategoryPath, pq.Array(&tags)); err != nil {
+			continue
+		}
+		if tags == nil {
+			tags = []string{}
+		}
+		it.Tags = tags
+		it.Updated = mtime.UnixMilli()
+		items = append(items, it)
+	}
+	writeJSON(w, items)
+}
+
+// handleDocument dispatches /api/documents/{slug}[...] requests. A slug may
+// itself contain slashes (e.g. "translations/foo"); a path ending in
+// "/comments" goes to the comments handler, everything else is a document.
+func handleDocument(w http.ResponseWriter, r *http.Request) {
+	rest := strings.TrimPrefix(r.URL.Path, "/api/documents/")
+	if strings.HasSuffix(rest, "/comments") {
+		slug := strings.TrimSuffix(rest, "/comments")
+		handleComments(w, r, slug)
+		return
+	}
+	slug := strings.TrimSuffix(rest, "/")
+	if slug == "" {
+		handleDocumentList(w, r)
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		getDocument(w, r, slug)
+	case http.MethodPut:
+		putDocument(w, r, slug)
+	case http.MethodDelete:
+		deleteDocument(w, r, slug)
+	default:
+		httpError(w, fmt.Errorf("method not allowed"), 405)
+	}
+}
+
+type docDetail struct {
+	Slug         string   `json:"slug"`
+	FilePath     string   `json:"file_path"`
+	Title        string   `json:"title"`
+	RawContent   string   `json:"raw_content"`
+	Excerpt      string   `json:"excerpt"`
+	WordCount    int      `json:"word_count"`
+	Published    bool     `json:"published"`
+	Source       string   `json:"source"`
+	CategoryPath string   `json:"category"`
+	Tags         []string `json:"tags"`
+	Backlinks    []string `json:"backlinks"`
+	Updated      int64    `json:"updated"` // file_mtime, Unix ms
+}
+
+func getDocument(w http.ResponseWriter, r *http.Request, slug string) {
 	mu.RLock()
 	defer mu.RUnlock()
 
-	var d Document
+	var d docDetail
+	var mtime time.Time
 	err := db.QueryRow(`
-		SELECT slug, file_path, title, word_count, published, source
+		SELECT slug, file_path, title, raw_content, excerpt, word_count, published, source, category_path, file_mtime
 		FROM documents WHERE slug=$1`, slug).
-		Scan(&d.Slug, &d.FilePath, &d.Title, &d.WordCount, &d.Published, &d.Source)
+		Scan(&d.Slug, &d.FilePath, &d.Title, &d.RawContent, &d.Excerpt,
+			&d.WordCount, &d.Published, &d.Source, &d.CategoryPath, &mtime)
 	if err != nil {
 		httpError(w, fmt.Errorf("not found"), 404)
 		return
 	}
+	d.Updated = mtime.UnixMilli()
 
 	// tags
 	rows, _ := db.Query("SELECT tag FROM document_tags WHERE slug=$1", slug)
@@ -576,13 +699,258 @@ func handleDocument(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, d)
 }
 
-func handleReindex(w http.ResponseWriter, r *http.Request) {
-	// wipe old data so slug changes don't leave orphans
-	db.Exec("DELETE FROM backlinks")
-	db.Exec("DELETE FROM document_tags")
-	db.Exec("DELETE FROM documents")
-	rescan()
+// putDocument creates or replaces a document from a raw markdown body.
+func putDocument(w http.ResponseWriter, r *http.Request, slug string) {
+	raw, err := io.ReadAll(io.LimitReader(r.Body, 32<<20))
+	if err != nil {
+		httpError(w, err, 400)
+		return
+	}
+
+	// keep the import-provenance file_path if the doc already exists
+	var filePath string
+	db.QueryRow("SELECT file_path FROM documents WHERE slug=$1", slug).Scan(&filePath)
+
+	doc := parseDoc(slug, filePath, string(raw))
+	upsert(doc)
+	if doc.Published && !doc.CategoryManual && doc.CategoryPath == "" {
+		enqueueInsert(doc.Slug)
+	}
+
+	now := time.Now().UnixMilli()
+	if doc.Published {
+		enqueueEmbed(doc.Slug)
+	} else {
+		db.Exec("DELETE FROM embeddings WHERE slug=$1", doc.Slug)
+	}
+	mu.Lock()
+	if doc.Published {
+		searchIndex[doc.Slug] = &searchEntry{
+			slug:    doc.Slug,
+			title:   doc.Title,
+			plain:   strings.ToLower(doc.Content),
+			display: doc.Content,
+			mtime:   now,
+		}
+	} else {
+		delete(searchIndex, doc.Slug)
+		delete(embedIndex, doc.Slug)
+	}
+	mu.Unlock()
+
 	writeJSON(w, map[string]string{"status": "ok"})
+}
+
+func deleteDocument(w http.ResponseWriter, r *http.Request, slug string) {
+	mu.Lock()
+	deleteDoc(slug)
+	mu.Unlock()
+	writeJSON(w, map[string]string{"status": "ok"})
+}
+
+// ---- images API ----
+
+func handleImage(w http.ResponseWriter, r *http.Request) {
+	key := r.URL.Query().Get("path")
+	if key == "" || strings.Contains(key, "..") {
+		httpError(w, fmt.Errorf("invalid path"), 400)
+		return
+	}
+	var data []byte
+	var mime string
+	err := db.QueryRow("SELECT data, mime FROM images WHERE path=$1", key).Scan(&data, &mime)
+	if err != nil {
+		httpError(w, fmt.Errorf("not found"), 404)
+		return
+	}
+	w.Header().Set("Content-Type", mime)
+	w.Header().Set("Cache-Control", "private, max-age=300")
+	w.Write(data)
+}
+
+// ---- comments API ----
+
+type commentEntryJSON struct {
+	Author string `json:"author"`
+	Time   string `json:"time"` // "YYYY-MM-DD HH:mm", local
+	Text   string `json:"text"`
+}
+
+type commentThreadJSON struct {
+	ID       string             `json:"id"`
+	Quote    string             `json:"quote"`
+	Prefix   string             `json:"prefix"`
+	Suffix   string             `json:"suffix"`
+	Comments []commentEntryJSON `json:"comments"`
+}
+
+func handleComments(w http.ResponseWriter, r *http.Request, slug string) {
+	switch r.Method {
+	case http.MethodGet:
+		getComments(w, r, slug)
+	case http.MethodPost:
+		postComment(w, r, slug)
+	default:
+		httpError(w, fmt.Errorf("method not allowed"), 405)
+	}
+}
+
+func getComments(w http.ResponseWriter, r *http.Request, slug string) {
+	rows, err := db.Query(`
+		SELECT t.id, t.quote, t.prefix, t.suffix, e.author, e.text, e.created_at
+		FROM comment_threads t
+		JOIN comment_entries e ON e.thread_id = t.id
+		WHERE t.slug=$1
+		ORDER BY t.created_at, e.id`, slug)
+	if err != nil {
+		httpError(w, err, 500)
+		return
+	}
+	defer rows.Close()
+
+	threads := []commentThreadJSON{}
+	byID := map[string]int{}
+	for rows.Next() {
+		var id, quote, prefix, suffix, author, text string
+		var at time.Time
+		if err := rows.Scan(&id, &quote, &prefix, &suffix, &author, &text, &at); err != nil {
+			continue
+		}
+		i, ok := byID[id]
+		if !ok {
+			threads = append(threads, commentThreadJSON{
+				ID: id, Quote: quote, Prefix: prefix, Suffix: suffix,
+				Comments: []commentEntryJSON{},
+			})
+			i = len(threads) - 1
+			byID[id] = i
+		}
+		threads[i].Comments = append(threads[i].Comments, commentEntryJSON{
+			Author: author,
+			Time:   at.Local().Format("2006-01-02 15:04"),
+			Text:   text,
+		})
+	}
+	writeJSON(w, threads)
+}
+
+type newComment struct {
+	Author string `json:"author"`
+	Text   string `json:"text"`
+	Anchor *struct {
+		Quote  string `json:"quote"`
+		Prefix string `json:"prefix"`
+		Suffix string `json:"suffix"`
+	} `json:"anchor"`
+	Reply string `json:"reply"`
+}
+
+func postComment(w http.ResponseWriter, r *http.Request, slug string) {
+	// target document must exist and be published
+	var published bool
+	err := db.QueryRow("SELECT published FROM documents WHERE slug=$1", slug).Scan(&published)
+	if err != nil || !published {
+		httpError(w, fmt.Errorf("not found"), 404)
+		return
+	}
+
+	var c newComment
+	if err := json.NewDecoder(r.Body).Decode(&c); err != nil {
+		httpError(w, fmt.Errorf("invalid body"), 400)
+		return
+	}
+	c.Text = strings.TrimSpace(c.Text)
+	if c.Text == "" || len([]rune(c.Text)) > 2000 {
+		httpError(w, fmt.Errorf("text required, max 2000 chars"), 400)
+		return
+	}
+	c.Author = strings.TrimSpace(c.Author)
+	if c.Author == "" {
+		c.Author = "用户"
+	}
+	if a := []rune(c.Author); len(a) > 30 {
+		c.Author = string(a[:30])
+	}
+
+	if c.Reply != "" {
+		var exists bool
+		err := db.QueryRow("SELECT EXISTS(SELECT 1 FROM comment_threads WHERE id=$1 AND slug=$2)", c.Reply, slug).Scan(&exists)
+		if err != nil || !exists {
+			httpError(w, fmt.Errorf("thread not found"), 400)
+			return
+		}
+		if _, err := db.Exec("INSERT INTO comment_entries (thread_id, author, text) VALUES ($1,$2,$3)", c.Reply, c.Author, c.Text); err != nil {
+			httpError(w, err, 500)
+			return
+		}
+		writeJSON(w, map[string]interface{}{"ok": true, "id": c.Reply})
+		return
+	}
+
+	if c.Anchor == nil || strings.TrimSpace(c.Anchor.Quote) == "" {
+		httpError(w, fmt.Errorf("anchor.quote required"), 400)
+		return
+	}
+	id := randomID()
+	tx, err := db.Begin()
+	if err != nil {
+		httpError(w, err, 500)
+		return
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec("INSERT INTO comment_threads (id, slug, quote, prefix, suffix) VALUES ($1,$2,$3,$4,$5) ON CONFLICT (id) DO NOTHING",
+		id, slug, c.Anchor.Quote, c.Anchor.Prefix, c.Anchor.Suffix); err != nil {
+		httpError(w, err, 500)
+		return
+	}
+	if _, err := tx.Exec("INSERT INTO comment_entries (thread_id, author, text) VALUES ($1,$2,$3)", id, c.Author, c.Text); err != nil {
+		httpError(w, err, 500)
+		return
+	}
+	tx.Commit()
+	writeJSON(w, map[string]interface{}{"ok": true, "id": id})
+}
+
+const idChars = "0123456789abcdefghijklmnopqrstuvwxyz"
+
+// randomID mirrors the TS `Math.random().toString(36).slice(2, 8)`.
+func randomID() string {
+	b := make([]byte, 6)
+	for i := range b {
+		b[i] = idChars[rand.IntN(len(idChars))]
+	}
+	return string(b)
+}
+
+func handleReindex(w http.ResponseWriter, r *http.Request) {
+	loadIndexFromDB()
+	loadEmbeddingsFromDB()
+	writeJSON(w, map[string]string{"status": "ok"})
+}
+
+// handleReclassify clears the category of every published non-manual doc
+// and queues it for tree insertion. POST only; responds with {"queued": N}.
+func handleReclassify(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		httpError(w, fmt.Errorf("method not allowed"), 405)
+		return
+	}
+	rows, err := db.Query(
+		"UPDATE documents SET category_path='' WHERE published AND NOT category_manual RETURNING slug")
+	if err != nil {
+		httpError(w, err, 500)
+		return
+	}
+	queued := 0
+	for rows.Next() {
+		var slug string
+		if rows.Scan(&slug) == nil {
+			enqueueInsert(slug)
+			queued++
+		}
+	}
+	rows.Close()
+	writeJSON(w, map[string]int{"queued": queued})
 }
 
 // ---- helpers ----
@@ -603,11 +971,6 @@ func getEnv(k, def string) string {
 		return v
 	}
 	return def
-}
-
-func mustHome() string {
-	h, _ := os.UserHomeDir()
-	return h
 }
 
 // ---- frontmatter parser ----
@@ -736,63 +1099,4 @@ func bigramText(text string) string {
 func init() {
 	// ensure CJK characters work in regex
 	_ = utf8.RuneSelf
-}
-
-// ---- fsnotify ----
-
-func watchVault() {
-	// poll-based: check mtime every 30s, simpler than fsnotify cross-platform
-	ticker := time.NewTicker(30 * time.Second)
-	defer ticker.Stop()
-
-	// track known files and their mtimes
-	known := map[string]time.Time{}
-
-	for range ticker.C {
-		files := scanVaultFiles()
-		current := make(map[string]bool, len(files))
-		for _, fp := range files {
-			current[fp] = true
-			info, err := os.Stat(fp)
-			if err != nil {
-				continue
-			}
-			prev, exists := known[fp]
-			if exists && !info.ModTime().After(prev) {
-				continue
-			}
-			known[fp] = info.ModTime()
-
-			doc, err := parseFile(fp)
-			if err != nil {
-				continue
-			}
-			mu.Lock()
-			if doc.Published {
-				upsert(doc)
-				searchIndex[doc.Slug] = &searchEntry{
-					slug:    doc.Slug,
-					title:   doc.Title,
-					plain:   strings.ToLower(doc.Content),
-					display: doc.Content,
-					mtime:   fileMtime(fp),
-				}
-				log.Printf("updated: %s", doc.Slug)
-			} else {
-				// publish removed (or file unparsable as frontmatter):
-				// drop from the index so stale notes stop showing up
-				deleteDoc(doc.Slug)
-			}
-			mu.Unlock()
-		}
-		// files deleted from disk
-		for fp := range known {
-			if !current[fp] {
-				delete(known, fp)
-				mu.Lock()
-				deleteDoc(fileSlug(fp))
-				mu.Unlock()
-			}
-		}
-	}
 }
