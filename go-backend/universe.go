@@ -2,14 +2,27 @@ package main
 
 import (
 	"fmt"
+	"hash/fnv"
 	"net/http"
 	"sort"
+	"strconv"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/lib/pq"
 )
 
 const universeNeighbours = 6
+
+var universeVectorGeneration atomic.Uint64
+
+var universeCache = struct {
+	sync.Mutex
+	ready bool
+	key   uint64
+	graph universeGraph
+}{}
 
 type universeDocument struct {
 	Slug     string
@@ -197,6 +210,43 @@ func buildSemanticUniverse(docs []universeDocument, vectors map[string][]float32
 	return graph
 }
 
+func markUniverseDirty() {
+	universeVectorGeneration.Add(1)
+}
+
+func universeCacheKey(docs []universeDocument, vectorGeneration uint64) uint64 {
+	hash := fnv.New64a()
+	write := func(value string) {
+		_, _ = hash.Write([]byte(value))
+		_, _ = hash.Write([]byte{0})
+	}
+	write(strconv.FormatUint(vectorGeneration, 10))
+	for _, doc := range docs {
+		write(doc.Slug)
+		write(doc.Title)
+		write(doc.Category)
+		write(strconv.FormatInt(doc.Updated, 10))
+		for _, tag := range doc.Tags {
+			write(tag)
+		}
+	}
+	return hash.Sum64()
+}
+
+func cachedSemanticUniverse(docs []universeDocument, vectors map[string][]float32, vectorGeneration uint64) universeGraph {
+	key := universeCacheKey(docs, vectorGeneration)
+	universeCache.Lock()
+	defer universeCache.Unlock()
+	if universeCache.ready && universeCache.key == key {
+		return universeCache.graph
+	}
+	graph := buildSemanticUniverse(docs, vectors, universeNeighbours)
+	universeCache.ready = true
+	universeCache.key = key
+	universeCache.graph = graph
+	return graph
+}
+
 func loadUniverseDocuments() ([]universeDocument, error) {
 	rows, err := db.Query(`
 		SELECT d.slug, d.title, d.excerpt, d.category_path, d.file_mtime,
@@ -244,12 +294,21 @@ func handleUniverse(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	mu.RLock()
-	vectors := make(map[string][]float32, len(embedIndex))
-	for slug, vector := range embedIndex {
-		vectors[slug] = vector
+	var vectors map[string][]float32
+	var vectorGeneration uint64
+	for {
+		before := universeVectorGeneration.Load()
+		mu.RLock()
+		vectors = make(map[string][]float32, len(embedIndex))
+		for slug, vector := range embedIndex {
+			vectors[slug] = vector
+		}
+		mu.RUnlock()
+		vectorGeneration = universeVectorGeneration.Load()
+		if before == vectorGeneration {
+			break
+		}
 	}
-	mu.RUnlock()
 
-	writeJSON(w, buildSemanticUniverse(docs, vectors, universeNeighbours))
+	writeJSON(w, cachedSemanticUniverse(docs, vectors, vectorGeneration))
 }

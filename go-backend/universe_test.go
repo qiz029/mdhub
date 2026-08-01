@@ -68,3 +68,31 @@ func TestBuildSemanticUniverseConnectsAnOtherwiseIsolatedEmbeddedDocument(t *tes
 		t.Fatalf("unembedded node = %+v, want visible but disconnected", draft)
 	}
 }
+
+func TestCachedSemanticUniverseInvalidatesWhenVectorsChange(t *testing.T) {
+	universeCache.Lock()
+	universeCache.ready = false
+	universeCache.Unlock()
+	t.Cleanup(func() {
+		universeCache.Lock()
+		universeCache.ready = false
+		universeCache.Unlock()
+	})
+
+	docs := []universeDocument{{Slug: "a"}, {Slug: "b"}}
+	vectors := map[string][]float32{"a": {1, 0}, "b": {1, 0}}
+	first := cachedSemanticUniverse(docs, vectors, 10)
+	if len(first.Edges) != 1 {
+		t.Fatalf("first graph edges = %+v, want one edge", first.Edges)
+	}
+
+	vectors["b"] = []float32{-1, 0}
+	stale := cachedSemanticUniverse(docs, vectors, 10)
+	if len(stale.Edges) != 1 {
+		t.Fatal("same vector generation should reuse the cached graph")
+	}
+	fresh := cachedSemanticUniverse(docs, vectors, 11)
+	if len(fresh.Edges) != 0 {
+		t.Fatalf("new vector generation edges = %+v, want rebuilt graph", fresh.Edges)
+	}
+}

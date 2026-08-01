@@ -196,6 +196,9 @@ All of these are idempotent and safe to run any time:
 | Recompute embeddings | `curl -X POST localhost:10002/api/reembed` |
 | Re-sync from a vault | `./mdhub-go -import "<vault root>"` |
 
+Run `POST /api/reembed` once after upgrading to the Knowledge Universe build so
+existing documents use the whole-document sampled embedding representation.
+
 ## 5. Failure modes
 
 | Symptom | Likely cause | Fix |

@@ -77,6 +77,60 @@ function browserViewHref(slug: string): string {
   return `/mdhub${viewHref(slug)}`;
 }
 
+function semanticEdgesAtLimit(
+  nodes: UniverseNode[],
+  edges: UniverseEdge[],
+  limit: number,
+): UniverseEdge[] {
+  const incident = new Map<string, UniverseEdge[]>();
+  for (const node of nodes) incident.set(node.id, []);
+  for (const edge of edges) {
+    incident.get(edge.source)?.push(edge);
+    incident.get(edge.target)?.push(edge);
+  }
+
+  const top = new Map<string, Set<string>>();
+  for (const [id, candidates] of incident) {
+    const neighbours = [...candidates]
+      .sort((a, b) => b.similarity - a.similarity)
+      .slice(0, limit)
+      .map((edge) => (edge.source === id ? edge.target : edge.source));
+    top.set(id, new Set(neighbours));
+  }
+
+  const visible = edges.filter(
+    (edge) =>
+      top.get(edge.source)?.has(edge.target) &&
+      top.get(edge.target)?.has(edge.source),
+  );
+  const connected = new Set<string>();
+  const edgeKeys = new Set<string>();
+  const key = (edge: UniverseEdge) =>
+    edge.source < edge.target
+      ? `${edge.source}\u0000${edge.target}`
+      : `${edge.target}\u0000${edge.source}`;
+  for (const edge of visible) {
+    connected.add(edge.source);
+    connected.add(edge.target);
+    edgeKeys.add(key(edge));
+  }
+
+  // Preserve local coverage when a node's strongest relationship is not
+  // reciprocal at this density level.
+  for (const node of nodes) {
+    if (!node.embedded || connected.has(node.id)) continue;
+    const strongest = [...(incident.get(node.id) ?? [])].sort(
+      (a, b) => b.similarity - a.similarity,
+    )[0];
+    if (!strongest || edgeKeys.has(key(strongest))) continue;
+    visible.push(strongest);
+    edgeKeys.add(key(strongest));
+    connected.add(strongest.source);
+    connected.add(strongest.target);
+  }
+  return visible.sort((a, b) => b.similarity - a.similarity);
+}
+
 export function UniverseGraphView({ graph }: { graph: UniverseGraph }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const hostRef = useRef<HTMLDivElement>(null);
@@ -95,13 +149,9 @@ export function UniverseGraphView({ graph }: { graph: UniverseGraph }) {
   const [query, setQuery] = useState("");
 
   const visibleEdges = useMemo(() => {
-    if (density === "full" || graph.edges.length < 4) return graph.edges;
-    const ratio = density === "focused" ? 0.45 : 0.72;
-    const count = Math.max(1, Math.ceil(graph.edges.length * ratio));
-    return [...graph.edges]
-      .sort((a, b) => b.similarity - a.similarity)
-      .slice(0, count);
-  }, [density, graph.edges]);
+    const limit = density === "focused" ? 2 : density === "balanced" ? 4 : 6;
+    return semanticEdgesAtLimit(graph.nodes, graph.edges, limit);
+  }, [density, graph.edges, graph.nodes]);
 
   const selected = useMemo(
     () => graph.nodes.find((node) => node.id === selectedId) ?? null,
@@ -111,7 +161,7 @@ export function UniverseGraphView({ graph }: { graph: UniverseGraph }) {
   const related = useMemo(() => {
     if (!selectedId) return [];
     const nodes = new Map(graph.nodes.map((node) => [node.id, node]));
-    return graph.edges
+    return visibleEdges
       .flatMap((edge) => {
         if (edge.source === selectedId) {
           return [{ node: nodes.get(edge.target), similarity: edge.similarity }];
@@ -125,7 +175,7 @@ export function UniverseGraphView({ graph }: { graph: UniverseGraph }) {
         Boolean(item.node),
       )
       .sort((a, b) => b.similarity - a.similarity);
-  }, [graph.edges, graph.nodes, selectedId]);
+  }, [graph.nodes, selectedId, visibleEdges]);
 
   const searchResults = useMemo(() => {
     const value = query.trim().toLocaleLowerCase();
@@ -535,9 +585,9 @@ export function UniverseGraphView({ graph }: { graph: UniverseGraph }) {
               }
               className="mt-2 block w-full rounded-lg border border-stone-200 bg-stone-50 px-3 py-2.5 text-sm font-medium normal-case tracking-normal text-stone-700"
             >
-              <option value="focused">Focused · strongest 45%</option>
-              <option value="balanced">Balanced · strongest 72%</option>
-              <option value="full">Full · all relationships</option>
+              <option value="focused">Focused · Top 2 per node</option>
+              <option value="balanced">Balanced · Top 4 per node</option>
+              <option value="full">Full · Top 6 per node</option>
             </select>
           </label>
         </div>

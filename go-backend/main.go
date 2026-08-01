@@ -738,6 +738,7 @@ func putDocument(w http.ResponseWriter, r *http.Request, slug string) {
 		delete(embedIndex, doc.Slug)
 	}
 	mu.Unlock()
+	markUniverseDirty()
 
 	writeJSON(w, map[string]string{"status": "ok"})
 }
@@ -746,6 +747,7 @@ func deleteDocument(w http.ResponseWriter, r *http.Request, slug string) {
 	mu.Lock()
 	deleteDoc(slug)
 	mu.Unlock()
+	markUniverseDirty()
 	writeJSON(w, map[string]string{"status": "ok"})
 }
 
