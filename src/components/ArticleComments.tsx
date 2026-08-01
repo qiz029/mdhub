@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { memo, useEffect, useRef, useState, type RefObject } from "react";
 import { createPortal } from "react-dom";
 import { useRouter } from "next/navigation";
 import type { CommentThread } from "@/lib/comments";
@@ -11,6 +11,22 @@ const BLOCK_SELECTOR = "p, li, blockquote, h2, h3, h4, pre, td";
 type DraftAnchor = { quote: string; prefix: string; suffix: string };
 
 const norm = (s: string) => s.replace(/\s+/g, " ").trim();
+
+const ArticleBody = memo(function ArticleBody({
+  html,
+  rootRef,
+}: {
+  html: string;
+  rootRef: RefObject<HTMLDivElement | null>;
+}) {
+  return (
+    <div
+      ref={rootRef}
+      className="prose-md text-stone-800"
+      dangerouslySetInnerHTML={{ __html: html }}
+    />
+  );
+});
 
 // Locate the block element a thread is anchored to. Quote matching is
 // whitespace-normalized; when several blocks contain the quote, the stored
@@ -332,11 +348,7 @@ export function ArticleComments({
 
   return (
     <article>
-      <div
-        ref={ref}
-        className="prose-md text-stone-800"
-        dangerouslySetInnerHTML={{ __html: html }}
-      />
+      <ArticleBody html={html} rootRef={ref} />
 
       {containers.map(({ id, el }) => {
         const t = threads.find((th) => th.id === id);
