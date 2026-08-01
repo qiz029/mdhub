@@ -26,6 +26,7 @@ CREATE TABLE IF NOT EXISTS documents (
 -- idempotent migration for existing databases
 ALTER TABLE documents ADD COLUMN IF NOT EXISTS category_path TEXT NOT NULL DEFAULT '';
 ALTER TABLE documents ADD COLUMN IF NOT EXISTS category_manual BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE documents ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'note'; -- 'note' | 'fleeting'
 
 CREATE TABLE IF NOT EXISTS tags (
     name TEXT PRIMARY KEY
@@ -72,4 +73,18 @@ CREATE TABLE IF NOT EXISTS embeddings (
     slug      TEXT PRIMARY KEY REFERENCES documents(slug) ON DELETE CASCADE,
     embedding BYTEA NOT NULL,             -- float32 little-endian
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- spark collisions: high-similarity document pairs found by the collision
+-- engine (embedIndex cosine, see collide.go). slug_a < slug_b invariant.
+CREATE TABLE IF NOT EXISTS collisions (
+    id BIGSERIAL PRIMARY KEY,
+    slug_a TEXT NOT NULL REFERENCES documents(slug) ON DELETE CASCADE,
+    slug_b TEXT NOT NULL REFERENCES documents(slug) ON DELETE CASCADE,
+    score DOUBLE PRECISION NOT NULL,
+    explanation TEXT NOT NULL DEFAULT '',
+    question TEXT NOT NULL DEFAULT '',
+    verdict TEXT NOT NULL DEFAULT 'new',   -- new | confirmed | dismissed
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (slug_a, slug_b)
 );

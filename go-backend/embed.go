@@ -240,13 +240,15 @@ func waitEmbed() {
 	embedJobs.wait()
 }
 
-// doEmbed embeds one published document and stores the vector in Postgres
-// and the in-memory index. A slug that is no longer published gets its
-// stale embedding row deleted instead.
+// doEmbed embeds one published document (or spark — kind='fleeting') and
+// stores the vector in Postgres and the in-memory index. A slug that no
+// longer qualifies gets its stale embedding row deleted instead. A freshly
+// stored vector chains into the collision queue so collisions always run
+// against the new vector.
 func doEmbed(slug string, client *http.Client) error {
 	var title, content string
 	err := db.QueryRow(
-		"SELECT title, content FROM documents WHERE slug=$1 AND published=true", slug).
+		"SELECT title, content FROM documents WHERE slug=$1 AND (published=true OR kind='fleeting')", slug).
 		Scan(&title, &content)
 	if err == sql.ErrNoRows {
 		if _, deleteErr := db.Exec("DELETE FROM embeddings WHERE slug=$1", slug); deleteErr != nil {
@@ -285,15 +287,16 @@ func doEmbed(slug string, client *http.Client) error {
 	embedIndex[slug] = vec
 	mu.Unlock()
 	markUniverseDirty()
+	enqueueCollide(slug)
 	return nil
 }
 
 // loadEmbeddingsFromDB rebuilds the in-memory vector index from all
-// published documents that have a stored embedding.
+// published documents and sparks that have a stored embedding.
 func loadEmbeddingsFromDB() {
 	rows, err := db.Query(`
 		SELECT e.slug, e.embedding FROM embeddings e
-		JOIN documents d ON d.slug=e.slug AND d.published=true`)
+		JOIN documents d ON d.slug=e.slug AND (d.published=true OR d.kind='fleeting')`)
 	if err != nil {
 		log.Printf("load embeddings: %v", err)
 		return

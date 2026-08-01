@@ -17,18 +17,19 @@ func upsertDocument(doc *Document) error {
 	defer tx.Rollback()
 
 	if _, err := tx.Exec(`
-		INSERT INTO documents (slug, file_path, title, content, raw_content, excerpt, word_count, published, source, category_path, category_manual, file_mtime)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,now())
+		INSERT INTO documents (slug, file_path, title, content, raw_content, excerpt, word_count, published, kind, source, category_path, category_manual, file_mtime)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,now())
 		ON CONFLICT (slug) DO UPDATE SET
 			title=EXCLUDED.title, content=EXCLUDED.content,
 			raw_content=EXCLUDED.raw_content, excerpt=EXCLUDED.excerpt,
 			word_count=EXCLUDED.word_count, published=EXCLUDED.published,
+			kind=EXCLUDED.kind,
 			source=EXCLUDED.source,
 			category_manual=EXCLUDED.category_manual,
 			category_path = CASE WHEN EXCLUDED.category_path <> '' THEN EXCLUDED.category_path WHEN documents.category_manual AND NOT EXCLUDED.category_manual THEN '' ELSE documents.category_path END,
 			file_mtime=now()`,
 		doc.Slug, doc.FilePath, doc.Title, doc.Content, doc.RawContent,
-		doc.Excerpt, doc.WordCount, doc.Published, doc.Source, doc.CategoryPath, doc.CategoryManual); err != nil {
+		doc.Excerpt, doc.WordCount, doc.Published, doc.Kind, doc.Source, doc.CategoryPath, doc.CategoryManual); err != nil {
 		return fmt.Errorf("upsert document: %w", err)
 	}
 

@@ -3,6 +3,7 @@ import Link from "next/link";
 import { Nav } from "@/components/Nav";
 import { ViewerActions } from "@/components/ViewerActions";
 import { ArticleComments } from "@/components/ArticleComments";
+import { DocumentCollisions } from "@/components/DocumentCollisions";
 import { ReaderSettings } from "@/components/ReaderSettings";
 import { TableOfContents } from "@/components/TableOfContents";
 import { CodeCopy } from "@/components/CodeCopy";
@@ -182,6 +183,7 @@ export default async function ViewPage({
             />
           </div>
           <ArticleComments html={html} slug={slug} threads={comments} />
+          <DocumentCollisions slug={slug} />
           <CodeCopy />
           <RelatedDocumentLinks items={relatedDocuments} />
           <nav className="mt-10 flex items-start justify-between gap-4 border-t border-stone-100 pt-6">

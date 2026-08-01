@@ -37,6 +37,10 @@ func publishDocument(doc *Document) error {
 		if !doc.CategoryManual && doc.CategoryPath == "" {
 			enqueueInsert(doc.Slug)
 		}
+	}
+	// Sparks (kind='fleeting') stay out of every public projection but still
+	// get embedded so the collision engine can compare them.
+	if doc.Published || doc.Kind == "fleeting" {
 		enqueueEmbed(doc.Slug)
 	}
 	return nil

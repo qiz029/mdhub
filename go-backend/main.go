@@ -88,6 +88,7 @@ type Document struct {
 	Excerpt        string   `json:"excerpt,omitempty"`
 	WordCount      int      `json:"word_count"`
 	Published      bool     `json:"published"`
+	Kind           string   `json:"kind"` // "note" | "fleeting"
 	Source         string   `json:"source"`
 	CategoryPath   string   `json:"category"`
 	CategoryManual bool     `json:"category_manual,omitempty"`
@@ -155,9 +156,11 @@ func main() {
 	if *importDir != "" {
 		startClassifier()
 		startEmbedder()
+		startCollide()
 		runImport(*importDir)
 		waitClassify()
 		waitEmbed()
+		waitCollide()
 		return
 	}
 
@@ -171,6 +174,9 @@ func main() {
 	// background embedding worker (no-op without MDHUB_EMBED_URL)
 	startEmbedder()
 
+	// background collision worker (no-op without MDHUB_EMBED_URL)
+	startCollide()
+
 	// HTTP API
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/search", handleSearch)
@@ -180,6 +186,10 @@ func main() {
 	mux.HandleFunc("/api/backlinks/", handleBacklinks)
 	mux.HandleFunc("/api/documents", handleDocumentList)
 	mux.HandleFunc("/api/documents/", handleDocument)
+	mux.HandleFunc("/api/sparks", handleSparks)
+	mux.HandleFunc("/api/collisions", handleCollisions)
+	mux.HandleFunc("/api/collisions/", handleCollision)
+	mux.HandleFunc("/api/recollide", handleRecollide)
 	mux.HandleFunc("/api/images", handleImage)
 	mux.HandleFunc("/api/reindex", handleReindex)
 	mux.HandleFunc("/api/reclassify", handleReclassify)
@@ -272,6 +282,7 @@ func parseFile(fp string) (*Document, error) {
 func parseDoc(slug, filePath, raw string) *Document {
 	fm, body := splitFrontmatter(raw)
 	published := false
+	kind := "note"
 	source := "user"
 	category := ""
 	var tags []string
@@ -280,6 +291,11 @@ func parseDoc(slug, filePath, raw string) *Document {
 		line = strings.TrimSpace(line)
 		if value, ok := frontmatterValue(line, "publish"); ok {
 			published = strings.EqualFold(strings.Trim(value, "\"'"), "true")
+		}
+		if value, ok := frontmatterValue(line, "type"); ok {
+			if strings.EqualFold(strings.Trim(value, "\"'"), "fleeting") {
+				kind = "fleeting"
+			}
 		}
 		if strings.HasPrefix(line, "source:") {
 			source = strings.TrimSpace(strings.TrimPrefix(line, "source:"))
@@ -310,6 +326,7 @@ func parseDoc(slug, filePath, raw string) *Document {
 		Excerpt:        excerptOf(plain),
 		WordCount:      len([]rune(plain)),
 		Published:      published,
+		Kind:           kind,
 		Source:         source,
 		CategoryPath:   category,
 		CategoryManual: category != "",
@@ -585,6 +602,7 @@ type docListItem struct {
 	Slug         string   `json:"slug"`
 	Title        string   `json:"title"`
 	Excerpt      string   `json:"excerpt"`
+	Kind         string   `json:"kind"`
 	CategoryPath string   `json:"category"`
 	Tags         []string `json:"tags"`
 	Updated      int64    `json:"updated"` // file_mtime, Unix ms
@@ -597,12 +615,12 @@ func handleDocumentList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rows, err := db.Query(`
-		SELECT d.slug, d.title, d.excerpt, d.file_mtime, d.category_path,
+		SELECT d.slug, d.title, d.excerpt, d.file_mtime, d.category_path, d.kind,
 			COALESCE(array_agg(dt.tag ORDER BY dt.tag) FILTER (WHERE dt.tag IS NOT NULL), '{}')
 		FROM documents d
 		LEFT JOIN document_tags dt ON dt.slug = d.slug
 		WHERE d.published=true
-		GROUP BY d.slug, d.title, d.excerpt, d.file_mtime, d.category_path
+		GROUP BY d.slug, d.title, d.excerpt, d.file_mtime, d.category_path, d.kind
 		ORDER BY d.file_mtime DESC`)
 	if err != nil {
 		httpError(w, err, 500)
@@ -615,7 +633,7 @@ func handleDocumentList(w http.ResponseWriter, r *http.Request) {
 		var it docListItem
 		var mtime time.Time
 		var tags []string
-		if err := rows.Scan(&it.Slug, &it.Title, &it.Excerpt, &mtime, &it.CategoryPath, pq.Array(&tags)); err != nil {
+		if err := rows.Scan(&it.Slug, &it.Title, &it.Excerpt, &mtime, &it.CategoryPath, &it.Kind, pq.Array(&tags)); err != nil {
 			httpError(w, err, http.StatusInternalServerError)
 			return
 		}
@@ -674,6 +692,7 @@ type docDetail struct {
 	Excerpt      string   `json:"excerpt"`
 	WordCount    int      `json:"word_count"`
 	Published    bool     `json:"published"`
+	Kind         string   `json:"kind"`
 	Source       string   `json:"source"`
 	CategoryPath string   `json:"category"`
 	Tags         []string `json:"tags"`
@@ -685,10 +704,10 @@ func getDocument(w http.ResponseWriter, r *http.Request, slug string) {
 	var d docDetail
 	var mtime time.Time
 	err := db.QueryRow(`
-		SELECT slug, file_path, title, raw_content, excerpt, word_count, published, source, category_path, file_mtime
+		SELECT slug, file_path, title, raw_content, excerpt, word_count, published, kind, source, category_path, file_mtime
 		FROM documents WHERE slug=$1`, slug).
 		Scan(&d.Slug, &d.FilePath, &d.Title, &d.RawContent, &d.Excerpt,
-			&d.WordCount, &d.Published, &d.Source, &d.CategoryPath, &mtime)
+			&d.WordCount, &d.Published, &d.Kind, &d.Source, &d.CategoryPath, &mtime)
 	if err != nil {
 		httpError(w, fmt.Errorf("not found"), 404)
 		return

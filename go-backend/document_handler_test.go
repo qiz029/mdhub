@@ -15,8 +15,8 @@ func expectDraftDocument(mock sqlmock.Sqlmock) {
 		WithArgs("draft").
 		WillReturnRows(sqlmock.NewRows([]string{
 			"slug", "file_path", "title", "raw_content", "excerpt", "word_count",
-			"published", "source", "category_path", "file_mtime",
-		}).AddRow("draft", "", "Draft", "secret draft", "secret", 12, false, "user", "", time.Now()))
+			"published", "kind", "source", "category_path", "file_mtime",
+		}).AddRow("draft", "", "Draft", "secret draft", "secret", 12, false, "note", "user", "", time.Now()))
 }
 
 func TestGetDocumentHidesDraftWithoutEditAccess(t *testing.T) {

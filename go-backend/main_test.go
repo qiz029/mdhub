@@ -94,6 +94,32 @@ func TestParseDocRequiresExactPublishBoolean(t *testing.T) {
 	}
 }
 
+func TestParseDocKind(t *testing.T) {
+	tests := []struct {
+		name  string
+		value string
+		kind  string
+	}{
+		{name: "fleeting", value: "fleeting", kind: "fleeting"},
+		{name: "quoted fleeting", value: `"fleeting"`, kind: "fleeting"},
+		{name: "explicit note", value: "note", kind: "note"},
+		{name: "substring", value: "fleetingx", kind: "note"},
+		{name: "empty", value: "", kind: "note"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			doc := parseDoc("note", "", "---\ntype: "+tt.value+"\n---\n# Note")
+			if doc.Kind != tt.kind {
+				t.Fatalf("Kind = %q, want %q", doc.Kind, tt.kind)
+			}
+		})
+	}
+	// no frontmatter type at all -> note
+	if doc := parseDoc("note", "", "# Note"); doc.Kind != "note" {
+		t.Fatalf("Kind = %q, want note", doc.Kind)
+	}
+}
+
 func TestHTTPErrorHidesInternalDetailsAndSetsHeaders(t *testing.T) {
 	response := httptest.NewRecorder()
 	httpError(response, fmt.Errorf("pq: secret database detail"), http.StatusInternalServerError)

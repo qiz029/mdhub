@@ -86,8 +86,8 @@ func TestHandleDocumentListReturnsPublishedSummaries(t *testing.T) {
 	mock := withMockDatabase(t)
 	mock.ExpectQuery("SELECT d.slug, d.title, d.excerpt").
 		WillReturnRows(sqlmock.NewRows([]string{
-			"slug", "title", "excerpt", "file_mtime", "category_path", "tags",
-		}).AddRow("note", "Note", "Excerpt", time.Unix(100, 0), "技术", "{go}"))
+			"slug", "title", "excerpt", "file_mtime", "category_path", "kind", "tags",
+		}).AddRow("note", "Note", "Excerpt", time.Unix(100, 0), "技术", "note", "{go}"))
 	response := httptest.NewRecorder()
 	handleDocumentList(response, httptest.NewRequest(http.MethodGet, "/api/documents", nil))
 	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"category":"技术"`) {

@@ -70,6 +70,31 @@ func TestPublishDocumentUpdatesProjectionsAfterCommit(t *testing.T) {
 	}
 }
 
+func TestPublishDocumentFleetingStaysPrivateButEnqueuesEmbed(t *testing.T) {
+	mock := withMockDatabase(t)
+	isolatePublicationState(t)
+	embedBaseURL = "http://embed"
+	doc := &Document{Slug: "_sparks/1", Title: "Spark", Content: "idea", Kind: "fleeting"}
+	searchIndex[doc.Slug] = &searchEntry{title: "Old"}
+	expectDocumentWrite(mock, doc.Slug)
+
+	if err := publishDocument(doc); err != nil {
+		t.Fatal(err)
+	}
+	mu.RLock()
+	_, searchable := searchIndex[doc.Slug]
+	mu.RUnlock()
+	if searchable {
+		t.Fatal("fleeting note entered the public search index")
+	}
+	if got := drainEmbedJob(t); got != doc.Slug {
+		t.Fatalf("embed job = %q, want %q", got, doc.Slug)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestPublishDocumentDraftRemovesRuntimeProjections(t *testing.T) {
 	mock := withMockDatabase(t)
 	isolatePublicationState(t)
