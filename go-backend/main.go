@@ -124,6 +124,7 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/search", handleSearch)
 	mux.HandleFunc("/api/tags", handleTags)
+	mux.HandleFunc("/api/universe", handleUniverse)
 	mux.HandleFunc("/api/backlinks/", handleBacklinks)
 	mux.HandleFunc("/api/documents", handleDocumentList)
 	mux.HandleFunc("/api/documents/", handleDocument)

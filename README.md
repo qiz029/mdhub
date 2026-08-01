@@ -102,6 +102,7 @@ The home page lists all published notes, newest first. Each gets a URL at `/view
 | `PUT /api/documents/{slug}` | Create/update from raw markdown body |
 | `DELETE /api/documents/{slug}` | Delete note (tags/backlinks/comments cascade) |
 | `GET /api/search?q=` | Full-text search with snippets (CJK bigram, in-memory) |
+| `GET /api/universe` | Published-document nodes and sparse semantic-similarity edges |
 | `GET /api/tags` · `GET /api/tags?tag=` | Tag counts / notes per tag |
 | `GET /api/backlinks/{slug}` | Notes linking to a slug |
 | `GET /api/images?path=` | Image binary stored in PG |
@@ -138,6 +139,7 @@ The home page lists all published notes, newest first. Each gets a URL at `/view
 - **Database-first**: PostgreSQL is the source of truth. The vault filesystem is only read once, by the importer.
 - **Frontmatter-driven**: `publish: true` controls visibility; `tags` enable filtering.
 - **Hybrid search**: In-memory CJK bigram keyword matching (PostgreSQL's tsvector silently drops CJK on macOS) blended with local embedding semantics — optionally powered by Qwen3-Embedding-0.6B via Ollama on CPU, so "怎么烹饪猪肉" can find a 红烧肉 note with no literal overlap. Disabled when `MDHUB_EMBED_URL` is unset.
+- **Knowledge Universe**: A top-level semantic map beside Documents. Published notes are nodes; mutual embedding-neighbour relationships form a sparse graph with zoom, pan, search, adjustable edge density, and document-level inspection. Notes without embeddings remain visible as disconnected nodes until `POST /api/reembed` completes.
 - **Images in PG**: Image binaries are imported into the database and served through `/api/images`.
 - **Anchored comments**: Readers select text to comment on; threads are stored in PG and shown beside the article.
 - **Tree sidebar**: The home page has a filesystem-style sidebar — drill down level by level, with a breadcrumb bar on top.
