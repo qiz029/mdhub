@@ -69,6 +69,36 @@ func TestBuildSemanticUniverseConnectsAnOtherwiseIsolatedEmbeddedDocument(t *tes
 	}
 }
 
+func TestSemanticClusterAssignmentsSeparatesWeaklyConnectedCommunities(t *testing.T) {
+	nodes := []universeNode{
+		{ID: "a", Embedded: true},
+		{ID: "b", Embedded: true},
+		{ID: "c", Embedded: true},
+		{ID: "d", Embedded: true},
+		{ID: "missing"},
+	}
+	edges := []universeEdge{
+		{Source: "a", Target: "b", Similarity: 0.96},
+		{Source: "c", Target: "d", Similarity: 0.94},
+		{Source: "b", Target: "c", Similarity: 0.08},
+	}
+
+	clusters := semanticClusterAssignments(nodes, edges)
+
+	if clusters["a"] != clusters["b"] {
+		t.Fatalf("a and b clusters = %d, %d; want the same cluster", clusters["a"], clusters["b"])
+	}
+	if clusters["c"] != clusters["d"] {
+		t.Fatalf("c and d clusters = %d, %d; want the same cluster", clusters["c"], clusters["d"])
+	}
+	if clusters["a"] == clusters["c"] {
+		t.Fatalf("clusters = %+v; want the weakly connected communities separated", clusters)
+	}
+	if clusters["missing"] != -1 {
+		t.Fatalf("unembedded cluster = %d; want -1", clusters["missing"])
+	}
+}
+
 func TestCachedSemanticUniverseInvalidatesWhenVectorsChange(t *testing.T) {
 	universeCache.Lock()
 	universeCache.ready = false

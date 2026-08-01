@@ -42,6 +42,7 @@ type universeNode struct {
 	Updated  int64    `json:"updated"`
 	Embedded bool     `json:"embedded"`
 	Degree   int      `json:"degree"`
+	Cluster  int      `json:"cluster"`
 }
 
 type universeEdge struct {
@@ -69,6 +70,119 @@ type universeGraph struct {
 type semanticNeighbour struct {
 	slug       string
 	similarity float64
+}
+
+type weightedNeighbour struct {
+	index  int
+	weight float64
+}
+
+// semanticClusterAssignments uses the local-moving phase of weighted Louvain
+// community detection. Strong relationships pull documents into the same
+// community while the modularity penalty prevents a weak bridge from merging
+// otherwise distinct topics. Node and candidate ordering are deterministic so
+// the API returns stable cluster IDs for the same graph.
+func semanticClusterAssignments(nodes []universeNode, edges []universeEdge) map[string]int {
+	assignments := make(map[string]int, len(nodes))
+	indexByID := make(map[string]int, len(nodes))
+	for i, node := range nodes {
+		indexByID[node.ID] = i
+		assignments[node.ID] = -1
+	}
+
+	adjacency := make([][]weightedNeighbour, len(nodes))
+	degrees := make([]float64, len(nodes))
+	for _, edge := range edges {
+		left, leftOK := indexByID[edge.Source]
+		right, rightOK := indexByID[edge.Target]
+		if !leftOK || !rightOK || left == right || edge.Similarity <= 0 {
+			continue
+		}
+		adjacency[left] = append(adjacency[left], weightedNeighbour{right, edge.Similarity})
+		adjacency[right] = append(adjacency[right], weightedNeighbour{left, edge.Similarity})
+		degrees[left] += edge.Similarity
+		degrees[right] += edge.Similarity
+	}
+
+	var totalWeight float64
+	for _, degree := range degrees {
+		totalWeight += degree
+	}
+	if totalWeight == 0 {
+		return assignments
+	}
+
+	communities := make([]int, len(nodes))
+	communityTotals := append([]float64(nil), degrees...)
+	for i := range communities {
+		communities[i] = i
+	}
+
+	const epsilon = 1e-12
+	for pass := 0; pass < 20; pass++ {
+		moved := false
+		for nodeIndex, node := range nodes {
+			if !node.Embedded || degrees[nodeIndex] == 0 {
+				continue
+			}
+			current := communities[nodeIndex]
+			communityTotals[current] -= degrees[nodeIndex]
+
+			weights := make(map[int]float64, len(adjacency[nodeIndex]))
+			for _, neighbour := range adjacency[nodeIndex] {
+				weights[communities[neighbour.index]] += neighbour.weight
+			}
+			candidates := make([]int, 0, len(weights))
+			for candidate := range weights {
+				candidates = append(candidates, candidate)
+			}
+			sort.Ints(candidates)
+
+			best := current
+			bestGain := 0.0
+			for _, candidate := range candidates {
+				gain := weights[candidate] - degrees[nodeIndex]*communityTotals[candidate]/totalWeight
+				if gain > bestGain+epsilon ||
+					(gain > epsilon && gain >= bestGain-epsilon && candidate < best) {
+					best = candidate
+					bestGain = gain
+				}
+			}
+
+			communities[nodeIndex] = best
+			communityTotals[best] += degrees[nodeIndex]
+			if best != current {
+				moved = true
+			}
+		}
+		if !moved {
+			break
+		}
+	}
+
+	members := make(map[int][]string)
+	for i, node := range nodes {
+		if !node.Embedded || degrees[i] == 0 {
+			continue
+		}
+		members[communities[i]] = append(members[communities[i]], node.ID)
+	}
+	type communityMembers struct {
+		community int
+		first     string
+	}
+	ordered := make([]communityMembers, 0, len(members))
+	for community, ids := range members {
+		sort.Strings(ids)
+		ordered = append(ordered, communityMembers{community: community, first: ids[0]})
+	}
+	sort.Slice(ordered, func(i, j int) bool { return ordered[i].first < ordered[j].first })
+	for cluster, group := range ordered {
+		for _, id := range members[group.community] {
+			assignments[id] = cluster
+		}
+	}
+	return assignments
 }
 
 func buildSemanticUniverse(docs []universeDocument, vectors map[string][]float32, neighbours int) universeGraph {
@@ -205,6 +319,10 @@ func buildSemanticUniverse(docs []universeDocument, vectors map[string][]float32
 		if edge.Similarity > graph.Meta.MaxSimilarity {
 			graph.Meta.MaxSimilarity = edge.Similarity
 		}
+	}
+	clusters := semanticClusterAssignments(graph.Nodes, graph.Edges)
+	for i := range graph.Nodes {
+		graph.Nodes[i].Cluster = clusters[graph.Nodes[i].ID]
 	}
 	graph.Meta.Edges = len(graph.Edges)
 	return graph
