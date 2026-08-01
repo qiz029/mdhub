@@ -354,6 +354,7 @@ export function UniverseGraphView({ graph }: { graph: UniverseGraph }) {
     const foreground = style.getPropertyValue("--foreground").trim() || "#211f1c";
     const border = style.getPropertyValue("--border-subtle").trim() || "#e7e4da";
     const transform = transformRef.current;
+    const now = performance.now() / 1000;
 
     context.setTransform(dpr, 0, 0, dpr, 0, 0);
     context.clearRect(0, 0, width, height);
@@ -385,6 +386,24 @@ export function UniverseGraphView({ graph }: { graph: UniverseGraph }) {
       context.lineWidth = (0.8 + Math.log1p(edge.count) * 0.72) / transform.k;
       context.setLineDash([6 / transform.k, 5 / transform.k]);
       context.stroke();
+
+      // Signal pulse travelling along the cluster link curve.
+      const clusterSeed = hashString(`${edge.sourceCluster}:${edge.targetCluster}`);
+      const clusterT = (now * 0.07 + (clusterSeed % 1000) / 1000) % 1;
+      const invT = 1 - clusterT;
+      const pulseX =
+        invT * invT * source.x +
+        2 * invT * clusterT * controlX +
+        clusterT * clusterT * target.x;
+      const pulseY =
+        invT * invT * source.y +
+        2 * invT * clusterT * controlY +
+        clusterT * clusterT * target.y;
+      context.beginPath();
+      context.arc(pulseX, pulseY, 2.2 / transform.k, 0, Math.PI * 2);
+      context.fillStyle = clusterColor(edge.sourceCluster);
+      context.globalAlpha = 0.55;
+      context.fill();
     }
     context.setLineDash([]);
     for (const edge of edgesRef.current) {
@@ -406,6 +425,29 @@ export function UniverseGraphView({ graph }: { graph: UniverseGraph }) {
       context.globalAlpha = emphasized ? 0.9 : 0.2 + strength * 0.32;
       context.lineWidth = (emphasized ? 2.2 : 0.6 + strength) / transform.k;
       context.stroke();
+
+      // Neuron-like signal pulses travelling along the edge. Stronger
+      // similarity means faster pulses; direction alternates per edge.
+      const seed = hashString(`${source.id}→${target.id}`);
+      const pulseCount = strength > 0.85 ? 2 : 1;
+      const speed = (0.1 + strength * 0.2) * (emphasized ? 1.8 : 1);
+      for (let p = 0; p < pulseCount; p++) {
+        const raw = (now * speed + (seed % 1000) / 1000 + p * 0.5) % 1;
+        const t = seed % 2 === 0 ? raw : 1 - raw;
+        const px = source.x + (target.x - source.x) * t;
+        const py = source.y + (target.y - source.y) * t;
+        const pulseRadius = (emphasized ? 2.6 : 1.8) / transform.k;
+        context.beginPath();
+        context.arc(px, py, pulseRadius * 2.6, 0, Math.PI * 2);
+        context.fillStyle = emphasized ? nodeColor(source) : foreground;
+        context.globalAlpha = emphasized ? 0.16 : 0.08;
+        context.fill();
+        context.beginPath();
+        context.arc(px, py, pulseRadius, 0, Math.PI * 2);
+        context.fillStyle = emphasized ? nodeColor(source) : foreground;
+        context.globalAlpha = emphasized ? 0.95 : 0.4;
+        context.fill();
+      }
     }
     context.globalAlpha = 1;
 
@@ -559,10 +601,22 @@ export function UniverseGraphView({ graph }: { graph: UniverseGraph }) {
       attributes: true,
       attributeFilter: ["class", "style"],
     });
+
+    // Keep repainting so the signal pulses along the edges animate.
+    const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
+    let animationFrame = 0;
+    const animate = () => {
+      render();
+      animationFrame = requestAnimationFrame(animate);
+    };
+    if (!reduceMotion.matches) {
+      animationFrame = requestAnimationFrame(animate);
+    }
     return () => {
       observer.disconnect();
       themeObserver.disconnect();
       simulation.stop();
+      cancelAnimationFrame(animationFrame);
     };
   }, [clusterEdges, graph.nodes, localEdges, render]);
 

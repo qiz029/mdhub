@@ -17,7 +17,7 @@ function tabClass(active: boolean): string {
 export function Nav({ active = "documents" }: NavProps) {
   return (
     <header className="border-b border-stone-200 bg-white">
-      <div className="mx-auto flex max-w-5xl flex-wrap items-center gap-x-5 gap-y-3 px-4 py-3 sm:px-6 xl:max-w-6xl">
+      <div className="mx-auto flex max-w-[90rem] flex-wrap items-center gap-x-5 gap-y-3 px-4 py-3 sm:px-6">
         <div className="flex shrink-0 items-center gap-4">
           {process.env.NEXT_PUBLIC_HEARTH_URL && (
             <>
