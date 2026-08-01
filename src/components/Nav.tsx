@@ -5,7 +5,7 @@ import { SearchBar } from "./SearchBar";
 export function Nav() {
   return (
     <header className="border-b border-stone-200 bg-white">
-      <div className="mx-auto flex max-w-5xl items-center justify-between gap-4 px-6 py-3">
+      <div className="mx-auto flex max-w-5xl items-center justify-between gap-4 px-4 py-3 sm:px-6 xl:max-w-6xl">
         <div className="flex items-center gap-4 shrink-0">
           {process.env.NEXT_PUBLIC_HEARTH_URL && (
             <>
@@ -22,7 +22,7 @@ export function Nav() {
           )}
           <Link
             href="/"
-            className="text-sm font-semibold tracking-tight text-stone-900 hover:text-stone-700"
+            className="text-[15px] font-semibold tracking-tight text-stone-900 hover:text-stone-700"
           >
             Markdown Hub
           </Link>

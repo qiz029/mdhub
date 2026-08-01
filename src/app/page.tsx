@@ -65,7 +65,7 @@ export default async function HomePage() {
   return (
     <div>
       <Nav />
-      <main className="mx-auto max-w-5xl xl:max-w-6xl px-6 py-10">
+      <main className="mx-auto max-w-5xl px-4 py-8 sm:px-6 md:py-10 xl:max-w-6xl">
         <DocumentBrowser
           documents={entries.map((entry) => ({
             entry,

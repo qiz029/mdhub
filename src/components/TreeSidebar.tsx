@@ -68,20 +68,25 @@ export function TreeSidebar({
   }
 
   return (
-    <nav>
-      <div className="flex items-center gap-1 text-xs text-stone-400 mb-2 overflow-x-auto whitespace-nowrap">
+    <nav aria-label="文档文件夹">
+      <div className="mb-3 flex items-center gap-1.5 overflow-x-auto whitespace-nowrap text-sm leading-5 text-stone-400">
         {crumbs.map((name, i) => {
           const isCurrent = i === crumbs.length - 1;
           return (
-            <span key={i} className="flex items-center gap-1">
-              {i > 0 && <ChevronRight size={12} className="text-stone-300" />}
+            <span key={i} className="flex items-center gap-1.5">
+              {i > 0 && <ChevronRight size={14} className="text-stone-300" />}
               {isCurrent ? (
-                <span className="text-stone-500">{name}</span>
+                <span
+                  aria-current="location"
+                  className="text-[15px] font-semibold text-stone-600"
+                >
+                  {name}
+                </span>
               ) : (
                 <button
                   type="button"
                   onClick={() => onSelectPath(selectedPath.slice(0, i))}
-                  className="hover:text-stone-700 transition-colors"
+                  className="inline-flex min-h-11 items-center font-medium transition-colors hover:text-stone-700 md:min-h-0"
                 >
                   {name}
                 </button>
@@ -91,17 +96,17 @@ export function TreeSidebar({
         })}
       </div>
 
-      <ul className="space-y-0.5">
+      <ul className="space-y-1">
         {folderNames.map((name) => (
           <li key={`d-${name}`}>
             <button
               type="button"
               onClick={() => onSelectPath([...selectedPath, name])}
-              className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-sm text-stone-700 font-medium hover:bg-stone-50 transition-colors"
+              className="flex min-h-11 w-full items-center gap-2.5 rounded-md px-2 py-2.5 text-[15px] font-medium leading-5 text-stone-700 transition-colors hover:bg-stone-50 md:min-h-9 md:py-2"
             >
-              <Folder size={15} className="shrink-0 text-stone-400" />
+              <Folder size={16} className="shrink-0 text-stone-400" />
               <span className="truncate">{name}</span>
-              <ChevronRight size={14} className="ml-auto shrink-0 text-stone-300" />
+              <ChevronRight size={15} className="ml-auto shrink-0 text-stone-300" />
             </button>
           </li>
         ))}
@@ -110,9 +115,9 @@ export function TreeSidebar({
             <button
               type="button"
               onClick={() => go(entry.slug)}
-              className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-sm text-stone-600 hover:bg-stone-50 transition-colors"
+              className="flex min-h-11 w-full items-center gap-2.5 rounded-md px-2 py-2.5 text-[15px] leading-5 text-stone-600 transition-colors hover:bg-stone-50 md:min-h-9 md:py-2"
             >
-              <FileText size={15} className="shrink-0 text-stone-300" />
+              <FileText size={16} className="shrink-0 text-stone-300" />
               <span className="truncate">{entry.title}</span>
             </button>
           </li>
