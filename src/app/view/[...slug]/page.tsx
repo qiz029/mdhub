@@ -146,66 +146,74 @@ export default async function ViewPage({
   return (
     <div>
       <Nav />
-      <TableOfContents items={toc} />
-      <main
-        className="mx-auto w-full px-5 sm:px-6 py-10"
-        style={{ maxWidth: "var(--reader-width, 42rem)" }}
+      <div
+        className={`mx-auto grid w-full max-w-[100rem] grid-cols-1 ${
+          toc.length >= 3
+            ? "xl:grid-cols-[18rem_minmax(0,1fr)] xl:gap-10 xl:px-6"
+            : ""
+        }`}
       >
-        <div className="mb-8 flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
-          <div className="min-w-0">
-            <h1 className="text-2xl sm:text-3xl font-bold text-stone-900">
-              {title}
-            </h1>
-            <div className="mt-2.5 flex flex-wrap items-center gap-x-3 gap-y-1.5 text-xs text-stone-400">
-              <time>{fmtDate(file.publishedAt)}</time>
-              {file.tags.map((t) => (
-                <span
-                  key={t}
-                  className="rounded-full bg-stone-100 px-2 py-0.5 text-stone-500"
-                >
-                  #{t}
-                </span>
-              ))}
+        <TableOfContents items={toc} />
+        <main
+          className="mx-auto w-full px-5 py-10 sm:px-6"
+          style={{ maxWidth: "var(--reader-width, 42rem)" }}
+        >
+          <div className="mb-8 flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+            <div className="min-w-0">
+              <h1 className="text-2xl sm:text-3xl font-bold text-stone-900">
+                {title}
+              </h1>
+              <div className="mt-2.5 flex flex-wrap items-center gap-x-3 gap-y-1.5 text-xs text-stone-400">
+                <time>{fmtDate(file.publishedAt)}</time>
+                {file.tags.map((t) => (
+                  <span
+                    key={t}
+                    className="rounded-full bg-stone-100 px-2 py-0.5 text-stone-500"
+                  >
+                    #{t}
+                  </span>
+                ))}
+              </div>
             </div>
+            <ViewerActions
+              markdown={file.content}
+              downloadName={downloadName}
+              slug={slug}
+            />
           </div>
-          <ViewerActions
-            markdown={file.content}
-            downloadName={downloadName}
-            slug={slug}
-          />
-        </div>
-        <ArticleComments html={html} slug={slug} threads={comments} />
-        <CodeCopy />
-        <RelatedDocumentLinks items={relatedDocuments} />
-        <nav className="mt-10 flex items-start justify-between gap-4 border-t border-stone-100 pt-6">
-          <div className="min-w-0 flex-1">
-            {prev && (
-              <Link
-                href={viewHref(prev.slug)}
-                className="group block text-sm text-stone-500 hover:text-stone-800"
-              >
-                <span className="text-xs text-stone-400">← 上一篇</span>
-                <span className="mt-1 block truncate font-medium">
-                  {prev.title}
-                </span>
-              </Link>
-            )}
-          </div>
-          <div className="min-w-0 flex-1 text-right">
-            {next && (
-              <Link
-                href={viewHref(next.slug)}
-                className="group block text-sm text-stone-500 hover:text-stone-800"
-              >
-                <span className="text-xs text-stone-400">下一篇 →</span>
-                <span className="mt-1 block truncate font-medium">
-                  {next.title}
-                </span>
-              </Link>
-            )}
-          </div>
-        </nav>
-      </main>
+          <ArticleComments html={html} slug={slug} threads={comments} />
+          <CodeCopy />
+          <RelatedDocumentLinks items={relatedDocuments} />
+          <nav className="mt-10 flex items-start justify-between gap-4 border-t border-stone-100 pt-6">
+            <div className="min-w-0 flex-1">
+              {prev && (
+                <Link
+                  href={viewHref(prev.slug)}
+                  className="group block text-sm text-stone-500 hover:text-stone-800"
+                >
+                  <span className="text-xs text-stone-400">← 上一篇</span>
+                  <span className="mt-1 block truncate font-medium">
+                    {prev.title}
+                  </span>
+                </Link>
+              )}
+            </div>
+            <div className="min-w-0 flex-1 text-right">
+              {next && (
+                <Link
+                  href={viewHref(next.slug)}
+                  className="group block text-sm text-stone-500 hover:text-stone-800"
+                >
+                  <span className="text-xs text-stone-400">下一篇 →</span>
+                  <span className="mt-1 block truncate font-medium">
+                    {next.title}
+                  </span>
+                </Link>
+              )}
+            </div>
+          </nav>
+        </main>
+      </div>
       <ReaderSettings />
     </div>
   );
