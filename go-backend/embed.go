@@ -40,6 +40,12 @@ var (
 	embedIndex = map[string][]float32{} // slug -> vector; guarded by mu (main.go)
 )
 
+const (
+	embeddingChunkRunes = 512
+	maxEmbeddingChunks  = 6
+	maxEmbeddingTitle   = 120
+)
+
 // ---- vector codec ----
 
 // encodeVec serializes a vector as 4-byte little-endian float32.
@@ -126,6 +132,91 @@ func embedText(client *http.Client, text string) ([]float32, error) {
 	return out.Data[0].Embedding, nil
 }
 
+// embeddingChunks samples a document from beginning to end instead of
+// representing long notes by their introduction alone. Every chunk retains
+// the title, and large documents are evenly sampled at a bounded cost.
+func embeddingChunks(title, content string) []string {
+	titleRunes := []rune(strings.TrimSpace(title))
+	if len(titleRunes) > maxEmbeddingTitle {
+		titleRunes = titleRunes[:maxEmbeddingTitle]
+	}
+	prefix := string(titleRunes) + "\n"
+	bodyRunes := []rune(content)
+	bodySize := embeddingChunkRunes - len([]rune(prefix))
+	if bodySize < 1 {
+		return []string{string([]rune(prefix)[:embeddingChunkRunes])}
+	}
+	if len(bodyRunes) == 0 {
+		return []string{strings.TrimSpace(prefix)}
+	}
+
+	all := make([]string, 0, (len(bodyRunes)+bodySize-1)/bodySize)
+	for start := 0; start < len(bodyRunes); start += bodySize {
+		end := start + bodySize
+		if end > len(bodyRunes) {
+			end = len(bodyRunes)
+		}
+		all = append(all, prefix+string(bodyRunes[start:end]))
+	}
+	if len(all) <= maxEmbeddingChunks {
+		return all
+	}
+
+	sampled := make([]string, 0, maxEmbeddingChunks)
+	for i := 0; i < maxEmbeddingChunks; i++ {
+		index := int(math.Round(float64(i) * float64(len(all)-1) / float64(maxEmbeddingChunks-1)))
+		sampled = append(sampled, all[index])
+	}
+	return sampled
+}
+
+// meanEmbedding gives each chunk equal influence regardless of the magnitude
+// returned by the embedding adapter, then normalizes the pooled document
+// vector for stable cosine comparisons.
+func meanEmbedding(vectors [][]float32) ([]float32, error) {
+	if len(vectors) == 0 || len(vectors[0]) == 0 {
+		return nil, fmt.Errorf("no embedding vectors to pool")
+	}
+	dimensions := len(vectors[0])
+	mean := make([]float64, dimensions)
+	used := 0
+	for _, vector := range vectors {
+		if len(vector) != dimensions {
+			return nil, fmt.Errorf("embedding dimension mismatch: %d and %d", dimensions, len(vector))
+		}
+		var magnitude float64
+		for _, value := range vector {
+			magnitude += float64(value) * float64(value)
+		}
+		if magnitude == 0 {
+			continue
+		}
+		magnitude = math.Sqrt(magnitude)
+		for i, value := range vector {
+			mean[i] += float64(value) / magnitude
+		}
+		used++
+	}
+	if used == 0 {
+		return nil, fmt.Errorf("embedding vectors are all zero")
+	}
+
+	var magnitude float64
+	for i := range mean {
+		mean[i] /= float64(used)
+		magnitude += mean[i] * mean[i]
+	}
+	if magnitude == 0 {
+		return nil, fmt.Errorf("pooled embedding is zero")
+	}
+	magnitude = math.Sqrt(magnitude)
+	pooled := make([]float32, dimensions)
+	for i := range mean {
+		pooled[i] = float32(mean[i] / magnitude)
+	}
+	return pooled, nil
+}
+
 // ---- indexing queue ----
 
 // enqueueEmbed queues a slug for (re-)embedding. No-op when the feature is
@@ -198,17 +289,22 @@ func doEmbed(slug string, client *http.Client) error {
 		mu.Lock()
 		delete(embedIndex, slug)
 		mu.Unlock()
+		markUniverseDirty()
 		return nil
 	}
 	if err != nil {
 		return err
 	}
 
-	text := title + "\n" + content
-	if r := []rune(text); len(r) > 512 {
-		text = string(r[:512])
+	chunkVectors := make([][]float32, 0, maxEmbeddingChunks)
+	for _, chunk := range embeddingChunks(title, content) {
+		vector, err := embedText(client, chunk)
+		if err != nil {
+			return err
+		}
+		chunkVectors = append(chunkVectors, vector)
 	}
-	vec, err := embedText(client, text)
+	vec, err := meanEmbedding(chunkVectors)
 	if err != nil {
 		return err
 	}
@@ -222,6 +318,7 @@ func doEmbed(slug string, client *http.Client) error {
 	mu.Lock()
 	embedIndex[slug] = vec
 	mu.Unlock()
+	markUniverseDirty()
 	return nil
 }
 
@@ -251,6 +348,7 @@ func loadEmbeddingsFromDB() {
 	mu.Lock()
 	embedIndex = newIndex
 	mu.Unlock()
+	markUniverseDirty()
 	log.Printf("embedding index loaded, %d vectors", len(newIndex))
 }
 

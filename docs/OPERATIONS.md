@@ -69,6 +69,7 @@ curl -X POST http://localhost:10002/api/reembed  # backfill existing notes
 ```bash
 curl -s http://localhost:10002/health                       # → ok
 curl -s http://localhost:10002/api/documents | head -c 200  # → JSON array (possibly [])
+curl -s http://localhost:10002/api/universe | head -c 200   # → nodes / semantic edges / coverage metadata
 curl -s "http://localhost:10002/api/search?q=test"          # → JSON array
 curl -s http://localhost:10001/mdhub/ | grep -o '<title>[^<]*' # → <title>Markdown Hub
 psql -d mdhub -c '\dt'   # documents, tags, document_tags, backlinks,
@@ -194,6 +195,9 @@ All of these are idempotent and safe to run any time:
 | Rebuild LLM category tree (keeps pinned) | `curl -X POST localhost:10002/api/reclassify` |
 | Recompute embeddings | `curl -X POST localhost:10002/api/reembed` |
 | Re-sync from a vault | `./mdhub-go -import "<vault root>"` |
+
+Run `POST /api/reembed` once after upgrading to the Knowledge Universe build so
+existing documents use the whole-document sampled embedding representation.
 
 ## 5. Failure modes
 

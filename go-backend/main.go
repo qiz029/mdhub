@@ -124,6 +124,7 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/search", handleSearch)
 	mux.HandleFunc("/api/tags", handleTags)
+	mux.HandleFunc("/api/universe", handleUniverse)
 	mux.HandleFunc("/api/backlinks/", handleBacklinks)
 	mux.HandleFunc("/api/documents", handleDocumentList)
 	mux.HandleFunc("/api/documents/", handleDocument)
@@ -737,6 +738,7 @@ func putDocument(w http.ResponseWriter, r *http.Request, slug string) {
 		delete(embedIndex, doc.Slug)
 	}
 	mu.Unlock()
+	markUniverseDirty()
 
 	writeJSON(w, map[string]string{"status": "ok"})
 }
@@ -745,6 +747,7 @@ func deleteDocument(w http.ResponseWriter, r *http.Request, slug string) {
 	mu.Lock()
 	deleteDoc(slug)
 	mu.Unlock()
+	markUniverseDirty()
 	writeJSON(w, map[string]string{"status": "ok"})
 }
 

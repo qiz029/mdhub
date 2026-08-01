@@ -5,8 +5,44 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"slices"
+	"strings"
 	"testing"
 )
+
+func TestEmbeddingChunksSampleTheWholeDocument(t *testing.T) {
+	content := "开头" + strings.Repeat("甲", 3500) + "结尾标记"
+	chunks := embeddingChunks("长文档", content)
+	if len(chunks) != maxEmbeddingChunks {
+		t.Fatalf("chunks = %d, want capped at %d", len(chunks), maxEmbeddingChunks)
+	}
+	if !strings.Contains(chunks[0], "开头") {
+		t.Fatalf("first chunk does not contain document start: %q", chunks[0])
+	}
+	if !strings.Contains(chunks[len(chunks)-1], "结尾标记") {
+		t.Fatalf("last chunk does not sample document end: %q", chunks[len(chunks)-1])
+	}
+	for _, chunk := range chunks {
+		if !strings.HasPrefix(chunk, "长文档\n") {
+			t.Fatalf("chunk does not retain title context: %q", chunk)
+		}
+		if len([]rune(chunk)) > embeddingChunkRunes {
+			t.Fatalf("chunk length = %d, want <= %d", len([]rune(chunk)), embeddingChunkRunes)
+		}
+	}
+}
+
+func TestMeanEmbeddingNormalizesChunksBeforePooling(t *testing.T) {
+	got, err := meanEmbedding([][]float32{{3, 0}, {0, 4}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || math.Abs(float64(got[0]-got[1])) > 1e-6 {
+		t.Fatalf("mean embedding = %v, want equal contribution from both chunks", got)
+	}
+	if magnitude := math.Sqrt(float64(got[0]*got[0] + got[1]*got[1])); math.Abs(magnitude-1) > 1e-6 {
+		t.Fatalf("mean embedding magnitude = %v, want normalized vector", magnitude)
+	}
+}
 
 func TestEncodeDecodeVecRoundtrip(t *testing.T) {
 	in := []float32{0, 1.5, -2.25, math.MaxFloat32, -math.MaxFloat32, 3.14}
