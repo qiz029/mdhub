@@ -9,6 +9,10 @@ import { CodeCopy } from "@/components/CodeCopy";
 import { getPublishedFile, listPublished, type PublishedEntry } from "@/lib/vault";
 import { getComments } from "@/lib/comments";
 import { extractTitle, renderMarkdown } from "@/lib/markdown";
+import {
+  getRelatedDocuments,
+  type RelatedDocument,
+} from "@/lib/universe";
 
 export const dynamic = "force-dynamic";
 
@@ -51,6 +55,44 @@ function viewHref(slug: string): string {
   );
 }
 
+function RelatedDocumentLinks({ items }: { items: RelatedDocument[] }) {
+  if (items.length === 0) return null;
+  return (
+    <section
+      aria-labelledby="related-documents-title"
+      className="mt-10 border-t border-stone-100 pt-6"
+    >
+      <h2
+        id="related-documents-title"
+        className="text-sm font-semibold text-stone-800"
+      >
+        相关文档
+      </h2>
+      <ul className="mt-3 space-y-1">
+        {items.map((item) => (
+          <li key={item.slug}>
+            <Link
+              href={viewHref(item.slug)}
+              className="group flex min-h-10 items-center gap-3 rounded-lg px-2 text-sm text-stone-600 transition-colors hover:bg-stone-50 hover:text-stone-900"
+            >
+              <span className="min-w-0 flex-1 truncate">{item.title}</span>
+              <span className="text-xs tabular-nums text-stone-400">
+                {item.similarity.toFixed(2)}
+              </span>
+              <span
+                aria-hidden="true"
+                className="text-stone-300 group-hover:text-stone-500"
+              >
+                →
+              </span>
+            </Link>
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
+
 export default async function ViewPage({
   params,
 }: {
@@ -84,14 +126,17 @@ export default async function ViewPage({
   const fileDir = slugDir === "." ? "" : slugDir;
   const baseName = path.posix.basename(slug);
   const title = extractTitle(file.content, baseName);
-  const entries = await listPublished();
+  const [entries, comments, relatedDocuments] = await Promise.all([
+    listPublished(),
+    getComments(slug),
+    getRelatedDocuments(slug),
+  ]);
   const { html, toc } = await renderMarkdown(
     file.content,
     fileDir,
     makeLinkResolver(entries),
   );
   const downloadName = baseName + ".md";
-  const comments = await getComments(slug);
 
   // entries are newest-first: prev = newer article, next = older article
   const idx = entries.findIndex((e) => e.slug === slug);
@@ -131,6 +176,7 @@ export default async function ViewPage({
         </div>
         <ArticleComments html={html} slug={slug} threads={comments} />
         <CodeCopy />
+        <RelatedDocumentLinks items={relatedDocuments} />
         <nav className="mt-10 flex items-start justify-between gap-4 border-t border-stone-100 pt-6">
           <div className="min-w-0 flex-1">
             {prev && (

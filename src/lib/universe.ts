@@ -33,6 +33,12 @@ export type UniverseGraph = {
   };
 };
 
+export type RelatedDocument = {
+  slug: string;
+  title: string;
+  similarity: number;
+};
+
 export async function getUniverse(): Promise<UniverseGraph | null> {
   try {
     const res = await fetch(`${API_URL}/api/universe`, { cache: "no-store" });
@@ -40,5 +46,20 @@ export async function getUniverse(): Promise<UniverseGraph | null> {
     return (await res.json()) as UniverseGraph;
   } catch {
     return null;
+  }
+}
+
+export async function getRelatedDocuments(
+  slug: string,
+): Promise<RelatedDocument[]> {
+  try {
+    const res = await fetch(
+      `${API_URL}/api/related?slug=${encodeURIComponent(slug)}`,
+      { cache: "no-store" },
+    );
+    if (!res.ok) return [];
+    return (await res.json()) as RelatedDocument[];
+  } catch {
+    return [];
   }
 }

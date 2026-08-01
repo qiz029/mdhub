@@ -103,6 +103,7 @@ The home page lists all published notes, newest first. Each gets a URL at `/view
 | `DELETE /api/documents/{slug}` | Delete note (tags/backlinks/comments cascade) |
 | `GET /api/search?q=` | Full-text search with snippets (CJK bigram, in-memory) |
 | `GET /api/universe` | Published-document nodes and sparse semantic-similarity edges |
+| `GET /api/related?slug=` | Up to five semantic neighbours for a published document |
 | `GET /api/tags` · `GET /api/tags?tag=` | Tag counts / notes per tag |
 | `GET /api/backlinks/{slug}` | Notes linking to a slug |
 | `POST /api/images` | Upload a ≤20 MB PNG/JPEG/GIF/WebP/AVIF image (`multipart/form-data`) |

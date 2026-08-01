@@ -13,7 +13,10 @@ import (
 	"github.com/lib/pq"
 )
 
-const universeNeighbours = 6
+const (
+	universeNeighbours    = 6
+	relatedDocumentsLimit = 5
+)
 
 var universeVectorGeneration atomic.Uint64
 
@@ -69,6 +72,18 @@ type universeGraph struct {
 	Meta  universeMeta   `json:"meta"`
 }
 
+type relatedDocument struct {
+	Slug       string  `json:"slug"`
+	Title      string  `json:"title"`
+	Similarity float64 `json:"similarity"`
+}
+
+type relatedCandidate struct {
+	slug   string
+	title  string
+	vector []float32
+}
+
 type semanticNeighbour struct {
 	slug       string
 	similarity float64
@@ -77,6 +92,51 @@ type semanticNeighbour struct {
 type weightedNeighbour struct {
 	index  int
 	weight float64
+}
+
+func relatedDocuments(source []float32, candidates []relatedCandidate, limit int) []relatedDocument {
+	if len(source) == 0 || limit < 1 {
+		return []relatedDocument{}
+	}
+	related := make([]relatedDocument, 0, min(limit, len(candidates)))
+	for _, candidate := range candidates {
+		if len(candidate.vector) == 0 {
+			continue
+		}
+		similarity := cosine(source, candidate.vector)
+		if similarity <= 0 {
+			continue
+		}
+		related = append(related, relatedDocument{
+			Slug: candidate.slug, Title: candidate.title, Similarity: similarity,
+		})
+	}
+	sort.Slice(related, func(i, j int) bool {
+		if related[i].Similarity != related[j].Similarity {
+			return related[i].Similarity > related[j].Similarity
+		}
+		return related[i].Slug < related[j].Slug
+	})
+	if len(related) > limit {
+		related = related[:limit]
+	}
+	return related
+}
+
+func currentRelatedDocuments(slug string, limit int) []relatedDocument {
+	mu.RLock()
+	source := embedIndex[slug]
+	candidates := make([]relatedCandidate, 0, max(0, len(searchIndex)-1))
+	for candidateSlug, entry := range searchIndex {
+		if candidateSlug == slug {
+			continue
+		}
+		candidates = append(candidates, relatedCandidate{
+			slug: candidateSlug, title: entry.title, vector: embedIndex[candidateSlug],
+		})
+	}
+	mu.RUnlock()
+	return relatedDocuments(source, candidates, limit)
 }
 
 // semanticClusterAssignments uses the local-moving phase of weighted Louvain
@@ -404,15 +464,10 @@ func loadUniverseDocuments() ([]universeDocument, error) {
 	return docs, nil
 }
 
-func handleUniverse(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		httpError(w, fmt.Errorf("method not allowed"), http.StatusMethodNotAllowed)
-		return
-	}
+func currentSemanticUniverse() (universeGraph, error) {
 	docs, err := loadUniverseDocuments()
 	if err != nil {
-		httpError(w, err, http.StatusInternalServerError)
-		return
+		return universeGraph{}, err
 	}
 
 	var vectors map[string][]float32
@@ -431,5 +486,31 @@ func handleUniverse(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	writeJSON(w, cachedSemanticUniverse(docs, vectors, vectorGeneration))
+	return cachedSemanticUniverse(docs, vectors, vectorGeneration), nil
+}
+
+func handleUniverse(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		httpError(w, fmt.Errorf("method not allowed"), http.StatusMethodNotAllowed)
+		return
+	}
+	graph, err := currentSemanticUniverse()
+	if err != nil {
+		httpError(w, err, http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, graph)
+}
+
+func handleRelatedDocuments(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		httpError(w, fmt.Errorf("method not allowed"), http.StatusMethodNotAllowed)
+		return
+	}
+	slug := r.URL.Query().Get("slug")
+	if slug == "" {
+		httpError(w, fmt.Errorf("missing slug"), http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, currentRelatedDocuments(slug, relatedDocumentsLimit))
 }

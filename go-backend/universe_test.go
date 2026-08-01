@@ -109,6 +109,33 @@ func TestBuildSemanticUniverseExposesDocumentWordCount(t *testing.T) {
 	}
 }
 
+func TestRelatedDocumentsRanksSemanticCandidates(t *testing.T) {
+	source := []float32{1, 0}
+	candidates := []relatedCandidate{
+		{slug: "alpha", title: "Alpha", vector: []float32{1, 1}},
+		{slug: "beta", title: "Beta", vector: []float32{1, 0}},
+		{slug: "gamma", title: "Gamma", vector: []float32{0, 1}},
+	}
+
+	related := relatedDocuments(source, candidates, 2)
+	if len(related) != 2 {
+		t.Fatalf("related = %+v, want two results", related)
+	}
+	if related[0].Slug != "beta" || related[0].Title != "Beta" || related[0].Similarity != 1 {
+		t.Fatalf("first related = %+v, want Beta at 1.0", related[0])
+	}
+	if related[1].Slug != "alpha" || related[1].Title != "Alpha" || related[1].Similarity < 0.70 || related[1].Similarity > 0.71 {
+		t.Fatalf("second related = %+v, want Alpha near 0.707", related[1])
+	}
+}
+
+func TestRelatedDocumentsReturnsEmptyForDisconnectedDocument(t *testing.T) {
+	related := relatedDocuments(nil, nil, 5)
+	if related == nil || len(related) != 0 {
+		t.Fatalf("related = %#v, want non-nil empty list", related)
+	}
+}
+
 func TestUniverseCacheKeyChangesWhenWordCountChanges(t *testing.T) {
 	docs := []universeDocument{{Slug: "note", Title: "Note", WordCount: 100}}
 	first := universeCacheKey(docs, 1)
