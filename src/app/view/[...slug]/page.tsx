@@ -123,7 +123,11 @@ export default async function ViewPage({
               ))}
             </div>
           </div>
-          <ViewerActions markdown={file.content} downloadName={downloadName} />
+          <ViewerActions
+            markdown={file.content}
+            downloadName={downloadName}
+            slug={slug}
+          />
         </div>
         <ArticleComments html={html} slug={slug} threads={comments} />
         <CodeCopy />

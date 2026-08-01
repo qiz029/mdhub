@@ -1,10 +1,12 @@
 import { NextRequest } from "next/server";
 import { API_URL } from "@/lib/config";
+import { requireEditToken } from "@/lib/edit-auth";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+const MAX_IMAGE_REQUEST_BYTES = 21 * 1024 * 1024;
 
-// Pure proxy: forwards vault-relative image keys to the Go backend.
+// Proxy image reads and validated browser uploads to the Go backend.
 export async function GET(req: NextRequest) {
   const url = new URL(req.url);
   const key = url.searchParams.get("path");
@@ -30,5 +32,45 @@ export async function GET(req: NextRequest) {
     });
   } catch {
     return new Response("upstream unavailable", { status: 502 });
+  }
+}
+
+export async function POST(req: NextRequest) {
+  const unauthorized = requireEditToken(req);
+  if (unauthorized) return unauthorized;
+
+  const contentType = req.headers.get("Content-Type") || "";
+  if (!contentType.toLowerCase().startsWith("multipart/form-data")) {
+    return Response.json({ error: "invalid multipart upload" }, { status: 400 });
+  }
+  const declaredLength = Number(req.headers.get("Content-Length"));
+  if (Number.isFinite(declaredLength) && declaredLength > MAX_IMAGE_REQUEST_BYTES) {
+    return Response.json({ error: "image upload exceeds 20 MB" }, { status: 413 });
+  }
+  if (!req.body) {
+    return Response.json({ error: "missing image file" }, { status: 400 });
+  }
+
+  try {
+    const upstream = await fetch(`${API_URL}/api/images`, {
+      method: "POST",
+      headers: {
+        "Content-Type": contentType,
+        "X-MDHub-Edit-Token": process.env.MDHUB_EDIT_TOKEN || "",
+      },
+      body: req.body,
+      cache: "no-store",
+      duplex: "half",
+    } as RequestInit & { duplex: "half" });
+    const body = await upstream.text();
+    return new Response(body, {
+      status: upstream.status,
+      headers: {
+        "Content-Type": upstream.headers.get("Content-Type") || "application/json",
+        "Cache-Control": "no-store",
+      },
+    });
+  } catch {
+    return Response.json({ error: "upstream unavailable" }, { status: 502 });
   }
 }

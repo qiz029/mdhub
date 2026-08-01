@@ -27,7 +27,7 @@ psql -d mdhub -f go-backend/schema.sql        # idempotent; safe to re-run
 # --- 2.2 Go backend ---
 cd go-backend
 cp .env.example .env                           # edit: MDHUB_PG at minimum
-go build -o mdhub-go .
+go build -tags nodynamic -o mdhub-go .              # deterministic WASM WebP codec
 
 # Optional: one-shot import of an existing Obsidian vault (vault ROOT):
 ./mdhub-go -import "/path/to/Obsidian Vault"   # idempotent; safe to re-run
@@ -115,19 +115,40 @@ curl -X DELETE http://localhost:10002/api/documents/<slug>   # → {"status":"ok
 
 Tags, backlinks, comments, and embeddings cascade automatically.
 
-### 3.3 Images — current limitation
+### 3.3 Images
 
-There is **no image upload API**. The `images` table is populated only by
-`-import`. If a published note references `![alt](path/pic.png)`, the image
-must already exist in the `images` table under a vault-relative key, resolved
-against the note's slug directory (e.g. slug `notes/a` + `![x](../img/p.png)`
-→ key `img/p.png`). Until an upload endpoint exists, publish images via
-`-import` or insert into the table directly:
+The document editor accepts selected, dropped, or pasted images. PNG, JPEG,
+and WebP inputs larger than 5 MB or 2560 px on their longest side are resized
+in the browser and encoded as WebP at approximately 82% quality. GIF and AVIF
+are preserved. The original upload must be at most 20 MB.
 
-```sql
-INSERT INTO images (path, data, mime) VALUES ('img/p.png', pg_read_file('/tmp/p.png')::bytea, 'image/png')
-ON CONFLICT (path) DO UPDATE SET data=EXCLUDED.data, updated_at=now();
+Browser editing is disabled until the same `MDHUB_EDIT_TOKEN` is configured in
+both `.env.local` and `go-backend/.env`. The editor asks for this token and
+keeps it only in the current browser session. The Go image-upload endpoint also
+requires the token, including for direct script calls.
+
+Scripts can call the same backend interface directly:
+
+```bash
+curl -X POST http://localhost:10002/api/images \
+  -H "X-MDHub-Edit-Token: $MDHUB_EDIT_TOKEN" \
+  -F 'file=@/tmp/diagram.png'
+# {"path":"uploads/ab/ab...png","href":"/uploads/ab/ab...png",...}
 ```
+
+The server validates file signatures and decodable dimensions, rejects SVG and
+non-image data, and enforces the same resize/WebP policy even when the browser
+is bypassed. Transcoding runs in a single isolated worker process with a 30s
+deadline. It then derives a SHA-256 content-addressed path and stores the binary in PostgreSQL.
+Repeated uploads of identical processed content reuse the same row. Insert the
+returned root-relative href into Markdown, for example
+`![diagram](/uploads/ab/ab...png)`.
+
+`uploads/` is reserved for immutable content-addressed uploads. The vault
+importer deliberately skips images under that directory; use another vault
+path for ordinary imported assets.
+
+Imported vault images continue to use their existing vault-relative keys.
 
 ### 3.4 Comments
 
@@ -170,7 +191,7 @@ brew services restart ollama
 ```bash
 git pull
 psql -d mdhub -f go-backend/schema.sql    # always re-run; it is idempotent (IF NOT EXISTS / ALTER IF NOT EXISTS)
-cd go-backend && go build -o mdhub-go . && go test -count=1 ./...
+cd go-backend && go build -tags nodynamic -o mdhub-go . && go test -count=1 ./...
 cd .. && npm run build
 # restart both services (4.1), then run the 2.6 verification block
 ```
@@ -237,6 +258,7 @@ Frontend (`.env.local`):
 |---|---|
 | `MDHUB_API_URL` | `http://localhost:10002` |
 | `MDHUB_PUBLIC_BASE_URL` | `http://localhost:10001/mdhub` |
+| `MDHUB_EDIT_TOKEN` | _(unset = browser editing and uploads disabled)_ |
 | `NEXT_PUBLIC_SEARCH_API` | `http://localhost:10002` |
 | `NEXT_PUBLIC_HEARTH_URL` | _(unset = link hidden)_ |
 

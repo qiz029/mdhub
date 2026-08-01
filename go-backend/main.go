@@ -1,17 +1,28 @@
 package main
 
 import (
+	"bytes"
+	"context"
+	"crypto/sha256"
+	"crypto/subtle"
 	"database/sql"
+	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"html"
+	"image"
+	"image/gif"
+	_ "image/jpeg"
+	_ "image/png"
 	"io"
 	"io/fs"
 	"log"
 	"math/rand/v2"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -20,8 +31,39 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/gen2brain/avif"
+	"github.com/gen2brain/webp"
 	"github.com/lib/pq"
+	"golang.org/x/image/draw"
 )
+
+const imageTranscodeWorkerEnv = "MDHUB_INTERNAL_IMAGE_TRANSCODE_WORKER"
+
+func init() {
+	if os.Getenv(imageTranscodeWorkerEnv) != "1" {
+		return
+	}
+	data, err := io.ReadAll(io.LimitReader(os.Stdin, maxImageUploadBytes+1))
+	if err == nil && int64(len(data)) > maxImageUploadBytes {
+		err = fmt.Errorf("worker input exceeds 20 MB")
+	}
+	mime := detectUploadImageMIME(data)
+	if err == nil && mime != "image/png" && mime != "image/jpeg" && mime != "image/webp" {
+		err = fmt.Errorf("worker received unsupported image type")
+	}
+	var output []byte
+	if err == nil {
+		output, err = transcodeStaticImage(data, mime)
+	}
+	if err == nil {
+		_, err = os.Stdout.Write(output)
+	}
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	os.Exit(0)
+}
 
 // ---- config ----
 
@@ -29,6 +71,7 @@ var (
 	vaultDir   string // only used by the one-shot `-import` command
 	pgDSN      = getEnv("MDHUB_PG", "postgres://mdhub:mdhub@localhost:5432/mdhub?sslmode=disable")
 	listenAddr = getEnv("MDHUB_LISTEN", ":10002")
+	editToken  = getEnv("MDHUB_EDIT_TOKEN", "")
 	db         *sql.DB
 	mu         sync.RWMutex
 )
@@ -73,6 +116,8 @@ type searchEntry struct {
 }
 
 var searchIndex = map[string]*searchEntry{}
+
+const maxDocumentBytes int64 = 32 << 20
 
 // ---- main ----
 
@@ -702,8 +747,14 @@ func getDocument(w http.ResponseWriter, r *http.Request, slug string) {
 
 // putDocument creates or replaces a document from a raw markdown body.
 func putDocument(w http.ResponseWriter, r *http.Request, slug string) {
-	raw, err := io.ReadAll(io.LimitReader(r.Body, 32<<20))
+	r.Body = http.MaxBytesReader(w, r.Body, maxDocumentBytes)
+	raw, err := io.ReadAll(r.Body)
 	if err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			httpError(w, fmt.Errorf("document exceeds 32 MB"), http.StatusRequestEntityTooLarge)
+			return
+		}
 		httpError(w, err, 400)
 		return
 	}
@@ -753,7 +804,89 @@ func deleteDocument(w http.ResponseWriter, r *http.Request, slug string) {
 
 // ---- images API ----
 
+const (
+	maxImageUploadBytes   int64 = 20 << 20
+	optimizeAboveBytes          = 5 << 20
+	maxImageDimension           = 2560
+	maxDecodedImagePixels       = 20_000_000
+)
+
+var imageTranscodeSlots = make(chan struct{}, 1)
+
+var uploadImageExtensions = map[string]string{
+	"image/png":  ".png",
+	"image/jpeg": ".jpg",
+	"image/gif":  ".gif",
+	"image/webp": ".webp",
+	"image/avif": ".avif",
+}
+
+func detectUploadImageMIME(data []byte) string {
+	switch {
+	case len(data) >= 8 && bytes.Equal(data[:8], []byte("\x89PNG\r\n\x1a\n")):
+		return "image/png"
+	case len(data) >= 3 && bytes.Equal(data[:3], []byte("\xff\xd8\xff")):
+		return "image/jpeg"
+	case len(data) >= 6 && (bytes.Equal(data[:6], []byte("GIF87a")) || bytes.Equal(data[:6], []byte("GIF89a"))):
+		return "image/gif"
+	case len(data) >= 12 && bytes.Equal(data[:4], []byte("RIFF")) && bytes.Equal(data[8:12], []byte("WEBP")):
+		return "image/webp"
+	case len(data) >= 12 && bytes.Equal(data[4:8], []byte("ftyp")):
+		limit := min(len(data), 32)
+		for offset := 8; offset+4 <= limit; offset += 4 {
+			brand := string(data[offset : offset+4])
+			if brand == "avif" || brand == "avis" {
+				return "image/avif"
+			}
+		}
+	}
+	return ""
+}
+
+func uploadedImagePath(data []byte, mime string) string {
+	sum := sha256.Sum256(data)
+	hash := fmt.Sprintf("%x", sum)
+	return "uploads/" + hash[:2] + "/" + hash + uploadImageExtensions[mime]
+}
+
+type imageUploadResponse struct {
+	Path string `json:"path"`
+	Href string `json:"href"`
+	MIME string `json:"mime"`
+	Size int    `json:"size"`
+}
+
+type parsedImageUpload struct {
+	data []byte
+	mime string
+	path string
+}
+
+func isContentAddressedUploadPath(key string, data []byte, mime string) bool {
+	if _, supported := uploadImageExtensions[mime]; !supported {
+		return false
+	}
+	return key == uploadedImagePath(data, mime)
+}
+
+func imageEditTokenValid(r *http.Request) bool {
+	providedHash := sha256.Sum256([]byte(r.Header.Get("X-MDHub-Edit-Token")))
+	expectedHash := sha256.Sum256([]byte(editToken))
+	return editToken != "" && subtle.ConstantTimeCompare(providedHash[:], expectedHash[:]) == 1
+}
+
 func handleImage(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		getImage(w, r)
+	case http.MethodPost:
+		uploadImage(w, r)
+	default:
+		httpError(w, fmt.Errorf("method not allowed"), http.StatusMethodNotAllowed)
+	}
+}
+
+func getImage(w http.ResponseWriter, r *http.Request) {
 	key := r.URL.Query().Get("path")
 	if key == "" || strings.Contains(key, "..") {
 		httpError(w, fmt.Errorf("invalid path"), 400)
@@ -767,8 +900,223 @@ func handleImage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", mime)
-	w.Header().Set("Cache-Control", "private, max-age=300")
+	if isContentAddressedUploadPath(key, data, mime) {
+		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+	} else {
+		w.Header().Set("Cache-Control", "private, max-age=300")
+	}
 	w.Write(data)
+}
+
+func uploadImage(w http.ResponseWriter, r *http.Request) {
+	if editToken == "" {
+		httpError(w, fmt.Errorf("image uploads disabled; configure MDHUB_EDIT_TOKEN"), http.StatusServiceUnavailable)
+		return
+	}
+	if !imageEditTokenValid(r) {
+		httpError(w, fmt.Errorf("invalid edit token"), http.StatusUnauthorized)
+		return
+	}
+
+	upload, code, err := parseImageUpload(w, r)
+	if err != nil {
+		httpError(w, err, code)
+		return
+	}
+
+	result, err := db.Exec(`
+		INSERT INTO images (path, data, mime) VALUES ($1, $2, $3)
+		ON CONFLICT (path) DO NOTHING`, upload.path, upload.data, upload.mime)
+	if err != nil {
+		httpError(w, err, http.StatusInternalServerError)
+		return
+	}
+	status := http.StatusOK
+	if inserted, _ := result.RowsAffected(); inserted > 0 {
+		status = http.StatusCreated
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	json.NewEncoder(w).Encode(imageUploadResponse{
+		Path: upload.path,
+		Href: "/" + upload.path,
+		MIME: upload.mime,
+		Size: len(upload.data),
+	})
+}
+
+func parseImageUpload(w http.ResponseWriter, r *http.Request) (parsedImageUpload, int, error) {
+	// Allow room for multipart headers while keeping the file itself capped at
+	// 20 MiB. MaxBytesReader also prevents oversized bodies from spilling an
+	// unbounded amount of data to temporary files.
+	r.Body = http.MaxBytesReader(w, r.Body, maxImageUploadBytes+(1<<20))
+	if err := r.ParseMultipartForm(maxImageUploadBytes); err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			return parsedImageUpload{}, http.StatusRequestEntityTooLarge, fmt.Errorf("image upload exceeds 20 MB")
+		}
+		return parsedImageUpload{}, http.StatusBadRequest, fmt.Errorf("invalid multipart upload")
+	}
+	if r.MultipartForm != nil {
+		defer r.MultipartForm.RemoveAll()
+	}
+	file, _, err := r.FormFile("file")
+	if err != nil {
+		return parsedImageUpload{}, http.StatusBadRequest, fmt.Errorf("missing image file")
+	}
+	defer file.Close()
+
+	data, err := io.ReadAll(io.LimitReader(file, maxImageUploadBytes+1))
+	if err != nil {
+		return parsedImageUpload{}, http.StatusBadRequest, fmt.Errorf("read image: %w", err)
+	}
+	if int64(len(data)) > maxImageUploadBytes {
+		return parsedImageUpload{}, http.StatusRequestEntityTooLarge, fmt.Errorf("image upload exceeds 20 MB")
+	}
+	mime := detectUploadImageMIME(data)
+	if mime == "" {
+		return parsedImageUpload{}, http.StatusUnsupportedMediaType, fmt.Errorf("unsupported image type; use PNG, JPEG, GIF, WebP, or AVIF")
+	}
+	data, mime, err = optimizeUploadedImage(data, mime)
+	if err != nil {
+		return parsedImageUpload{}, http.StatusUnprocessableEntity, err
+	}
+	if int64(len(data)) > maxImageUploadBytes {
+		return parsedImageUpload{}, http.StatusRequestEntityTooLarge, fmt.Errorf("processed image exceeds 20 MB")
+	}
+	key := uploadedImagePath(data, mime)
+	return parsedImageUpload{data: data, mime: mime, path: key}, http.StatusOK, nil
+}
+
+func optimizeUploadedImage(data []byte, mime string) ([]byte, string, error) {
+	var (
+		config image.Config
+		err    error
+	)
+	switch mime {
+	case "image/avif":
+		config, err = avif.DecodeConfig(bytes.NewReader(data))
+	case "image/gif":
+		config, err = gif.DecodeConfig(bytes.NewReader(data))
+	case "image/webp":
+		config, err = webp.DecodeConfig(bytes.NewReader(data))
+	default:
+		config, _, err = image.DecodeConfig(bytes.NewReader(data))
+	}
+	if err != nil || config.Width <= 0 || config.Height <= 0 {
+		return nil, "", fmt.Errorf("invalid %s image data", strings.TrimPrefix(mime, "image/"))
+	}
+	if mime == "image/webp" && isAnimatedWebP(data) {
+		return nil, "", fmt.Errorf("animated WebP is not supported; use GIF or a static WebP")
+	}
+	if int64(config.Width)*int64(config.Height) > maxDecodedImagePixels {
+		return nil, "", fmt.Errorf("image dimensions are too large")
+	}
+	if mime == "image/gif" || mime == "image/avif" {
+		return data, mime, nil
+	}
+	if len(data) <= optimizeAboveBytes && max(config.Width, config.Height) <= maxImageDimension {
+		return data, mime, nil
+	}
+	select {
+	case imageTranscodeSlots <- struct{}{}:
+		defer func() { <-imageTranscodeSlots }()
+	case <-time.After(30 * time.Second):
+		return nil, "", fmt.Errorf("image optimizer is busy; try again")
+	}
+
+	encoded, err := transcodeImageWithTimeout(data)
+	if err != nil {
+		return nil, "", err
+	}
+	return encoded, "image/webp", nil
+}
+
+func transcodeImageWithTimeout(data []byte) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	executable, err := os.Executable()
+	if err != nil {
+		return nil, fmt.Errorf("locate image worker: %w", err)
+	}
+	cmd := exec.CommandContext(ctx, executable)
+	cmd.Env = appendWithoutEnv(os.Environ(), imageTranscodeWorkerEnv, "1")
+	cmd.Stdin = bytes.NewReader(data)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	output, err := cmd.Output()
+	if ctx.Err() != nil {
+		return nil, fmt.Errorf("image transcode timed out")
+	}
+	if err != nil {
+		message := strings.TrimSpace(stderr.String())
+		if message == "" {
+			message = err.Error()
+		}
+		return nil, fmt.Errorf("image transcode failed: %s", message)
+	}
+	if int64(len(output)) > maxImageUploadBytes {
+		return nil, fmt.Errorf("processed image exceeds 20 MB")
+	}
+	return output, nil
+}
+
+func appendWithoutEnv(environment []string, key, value string) []string {
+	prefix := key + "="
+	filtered := make([]string, 0, len(environment)+1)
+	for _, entry := range environment {
+		if !strings.HasPrefix(entry, prefix) {
+			filtered = append(filtered, entry)
+		}
+	}
+	return append(filtered, prefix+value)
+}
+
+func transcodeStaticImage(data []byte, mime string) ([]byte, error) {
+	var (
+		source image.Image
+		err    error
+	)
+	if mime == "image/webp" {
+		source, err = webp.Decode(bytes.NewReader(data))
+	} else {
+		source, _, err = image.Decode(bytes.NewReader(data))
+	}
+	if err != nil {
+		return nil, fmt.Errorf("decode image: %w", err)
+	}
+
+	width, height := source.Bounds().Dx(), source.Bounds().Dy()
+	if longest := max(width, height); longest > maxImageDimension {
+		width = max(1, width*maxImageDimension/longest)
+		height = max(1, height*maxImageDimension/longest)
+	}
+	destination := image.NewRGBA(image.Rect(0, 0, width, height))
+	draw.CatmullRom.Scale(destination, destination.Bounds(), source, source.Bounds(), draw.Over, nil)
+
+	var encoded bytes.Buffer
+	if err := webp.Encode(&encoded, destination, webp.Options{Quality: 82, Method: 4}); err != nil {
+		return nil, fmt.Errorf("encode WebP: %w", err)
+	}
+	return encoded.Bytes(), nil
+}
+
+func isAnimatedWebP(data []byte) bool {
+	if len(data) < 12 || !bytes.Equal(data[:4], []byte("RIFF")) || !bytes.Equal(data[8:12], []byte("WEBP")) {
+		return false
+	}
+	for offset := 12; offset+8 <= len(data); {
+		chunkSize := uint64(binary.LittleEndian.Uint32(data[offset+4 : offset+8]))
+		if bytes.Equal(data[offset:offset+4], []byte("ANIM")) || bytes.Equal(data[offset:offset+4], []byte("ANMF")) {
+			return true
+		}
+		next := uint64(offset) + 8 + chunkSize + chunkSize%2
+		if next > uint64(len(data)) || next <= uint64(offset) {
+			return false
+		}
+		offset = int(next)
+	}
+	return false
 }
 
 // ---- comments API ----

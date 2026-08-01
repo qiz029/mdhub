@@ -28,6 +28,10 @@ var imageMimes = map[string]string{
 	".ico":  "image/x-icon",
 }
 
+func isReservedUploadPath(key string) bool {
+	return key == "uploads" || strings.HasPrefix(key, "uploads/")
+}
+
 func runImport(dir string) {
 	vaultDir = dir
 	var docs, images, threads, replies int
@@ -78,6 +82,10 @@ func runImport(dir string) {
 			return nil
 		}
 		key := filepath.ToSlash(rel)
+		if isReservedUploadPath(key) {
+			log.Printf("skip reserved upload image path %s", key)
+			return nil
+		}
 		if _, err := db.Exec(`
 			INSERT INTO images (path, data, mime) VALUES ($1,$2,$3)
 			ON CONFLICT (path) DO UPDATE SET data=EXCLUDED.data, mime=EXCLUDED.mime, updated_at=now()`,

@@ -37,7 +37,7 @@ psql -d mdhub -f go-backend/schema.sql   # create tables
 cd go-backend
 cp .env.example .env
 # Edit .env: set MDHUB_PG
-go build -o mdhub-go .
+go build -tags nodynamic -o mdhub-go .
 
 # Optional: one-shot import of an existing vault (documents + images + comments);
 # pass the vault ROOT — slugs stay vault-relative, e.g. "_translations/notes/foo":
@@ -105,6 +105,7 @@ The home page lists all published notes, newest first. Each gets a URL at `/view
 | `GET /api/universe` | Published-document nodes and sparse semantic-similarity edges |
 | `GET /api/tags` · `GET /api/tags?tag=` | Tag counts / notes per tag |
 | `GET /api/backlinks/{slug}` | Notes linking to a slug |
+| `POST /api/images` | Upload a ≤20 MB PNG/JPEG/GIF/WebP/AVIF image (`multipart/form-data`) |
 | `GET /api/images?path=` | Image binary stored in PG |
 | `GET/POST /api/documents/{slug}/comments` | Anchored comment threads |
 | `POST /api/reindex` | Rebuild the in-memory search index from PG |
@@ -128,6 +129,7 @@ The home page lists all published notes, newest first. Each gets a URL at `/view
 |---|---|---|
 | `MDHUB_PG` | `postgres://mdhub:***@localhost:5432/mdhub` | PostgreSQL DSN |
 | `MDHUB_LISTEN` | `:10002` | Listen address |
+| `MDHUB_EDIT_TOKEN` | _(unset = image uploads disabled)_ | Shared secret required by `POST /api/images` |
 | `MDHUB_LLM_BASE_URL` | `https://api.openai.com/v1` | OpenAI-compatible chat API base |
 | `MDHUB_LLM_API_KEY` | _(unset = disabled)_ | LLM API key |
 | `MDHUB_LLM_MODEL` | `gpt-4o-mini` | LLM model for categorization |
@@ -140,7 +142,7 @@ The home page lists all published notes, newest first. Each gets a URL at `/view
 - **Frontmatter-driven**: `publish: true` controls visibility; `tags` enable filtering.
 - **Hybrid search**: In-memory CJK bigram keyword matching (PostgreSQL's tsvector silently drops CJK on macOS) blended with local embedding semantics — optionally powered by Qwen3-Embedding-0.6B via Ollama on CPU, so "怎么烹饪猪肉" can find a 红烧肉 note with no literal overlap. Disabled when `MDHUB_EMBED_URL` is unset.
 - **Knowledge Universe**: A top-level semantic map beside Documents. Published notes are nodes; mutual embedding-neighbour relationships form a sparse graph, with one strongest-neighbour fallback for an otherwise isolated embedded note. Long notes are represented by pooling up to six evenly sampled chunks instead of only their introduction. The map supports zoom, pan, search, per-node edge density, and document-level inspection. Notes without embeddings remain visible as disconnected nodes until `POST /api/reembed` completes.
-- **Images in PG**: Image binaries are imported into the database and served through `/api/images`.
+- **Images in PG**: Image binaries are imported or uploaded into the database and served through `/api/images`. Uploads use reserved SHA-256 content-addressed paths; large static images are resized and converted to WebP in a time-limited worker before storage.
 - **Anchored comments**: Readers select text to comment on; threads are stored in PG and shown beside the article.
 - **Tree sidebar**: The home page has a filesystem-style sidebar — drill down level by level, with a breadcrumb bar on top.
 - **LLM semantic categories**: Optionally, an OpenAI-compatible LLM organizes published notes into a category tree that drives the sidebar. The algorithm works like a B-tree: each note descends from the root into the best-fitting folder, and any node with more than 10 direct children is split — the LLM reads the full text of that node's notes and proposes named groups. All work is local to the affected node (no global recomputation), async on write only, never on the read path; degrades to plain directory grouping when no API key is set. Frontmatter `category:` pins a note manually (never moved by splits) and always wins. Rebuild the whole tree with `POST /api/reclassify`.
@@ -161,7 +163,7 @@ If you ran MDHub when it read the vault directly:
 npm run build
 npm start            # Next.js on :10001
 # In go-backend/:
-go build -o mdhub-go && ./run.sh   # Go API on :10002
+go build -tags nodynamic -o mdhub-go . && ./run.sh   # Go API on :10002
 ```
 
 Launchd plist examples for macOS are available — see `scripts/start.sh` and `go-backend/run.sh` for the entry points.

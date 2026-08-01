@@ -92,13 +92,13 @@ export async function renderMarkdown(
         ? `<figure>${img}<figcaption>${escapeHtml(caption)}</figcaption></figure>`
         : img;
     if (!href) return wrap(lazyImg(origImage({ href: "", title, text } as any)));
-    if (isAbsoluteUrl(href) || href.startsWith("/api/image")) {
+    if (isAbsoluteUrl(href) || href.startsWith("/mdhub/api/image")) {
       return wrap(lazyImg(origImage({ href, title, text } as any)));
     }
     const key = href.startsWith("/")
       ? path.posix.normalize(href.slice(1))
       : path.posix.normalize(path.posix.join(slugDir, href));
-    const url = `/api/image?path=${encodeURIComponent(key)}`;
+    const url = `/mdhub/api/image?path=${encodeURIComponent(key)}`;
     return wrap(lazyImg(origImage({ href: url, title, text } as any)));
   };
 
