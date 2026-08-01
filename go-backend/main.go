@@ -712,7 +712,9 @@ func getDocument(w http.ResponseWriter, r *http.Request, slug string) {
 		httpError(w, fmt.Errorf("not found"), 404)
 		return
 	}
-	if !d.Published && !hasEditAccess(r) {
+	// sparks are publicly readable (see collide.go); unpublished notes stay
+	// hidden behind the edit token
+	if !d.Published && d.Kind != "fleeting" && !hasEditAccess(r) {
 		httpError(w, fmt.Errorf("not found"), http.StatusNotFound)
 		return
 	}

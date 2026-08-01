@@ -155,19 +155,27 @@ nohup "$MDHUB_RELEASE_DIR/scripts/start.sh" \
 ```bash
 curl -fsS http://localhost:10002/health
 
-# Anonymous privacy gates — these must NOT leak fleeting content:
-curl -fsS -o /dev/null -w '%{http_code}\n' http://localhost:10002/api/sparks
-#   expect 401 (token configured) or 503 (token unset)
+# Reads are public — this is a personal space, authentication lives at the
+# edge (proxy/ingress), not in the app:
+curl -fsS http://localhost:10002/api/sparks | jq 'length'
 curl -fsS "http://localhost:10002/api/collisions" | jq 'length'
-#   anonymous: only pairs where both documents are published
+#   anonymous callers see ALL sparks and ALL collision pairs
+
+# Writes still require the edit token — these must reject anonymous callers:
+curl -fsS -o /dev/null -w '%{http_code}\n' \
+  -X POST -d '{"verdict":"confirmed"}' http://localhost:10002/api/collisions/1
+#   expect 401 (token configured) or 503 (token unset)
+curl -fsS -o /dev/null -w '%{http_code}\n' \
+  -X POST http://localhost:10002/api/recollide
+#   expect 401 (token configured) or 503 (token unset)
 
 # Frontend routes:
 curl -fsS -o /dev/null -w '%{http_code}\n' http://localhost:10001/mdhub/
 curl -fsS -o /dev/null -w '%{http_code}\n' http://localhost:10001/mdhub/sparks/
 ```
 
-Expected: health `ok`; `/api/sparks` rejects anonymous callers; both frontend
-routes return 200.
+Expected: health `ok`; anonymous GETs return sparks and collisions; anonymous
+writes are rejected; both frontend routes return 200.
 
 ## Required one-time collision backfill
 
@@ -206,18 +214,19 @@ embedded on write. This is intentional.
 Open `http://localhost:10001/mdhub/` and verify:
 
 1. The header shows `Documents`, `Sparks`, `Universe` in that order.
-2. `/mdhub/sparks/` asks for the edit token on a fresh browser profile
-   (sessionStorage pattern, same as the editor); anonymous visitors see no
-   spark or collision data.
+2. `/mdhub/sparks/` renders the collision stream and fleeting stream for any
+   visitor, no token required. Capturing a spark or setting a verdict prompts
+   for the edit token on demand (sessionStorage pattern, same as the editor).
 3. Quick capture: submit one line of text; it appears in the 灵感流 list with
-   an age badge. Verify anonymously that it does NOT appear in `/`,
-   `/api/documents`, search, or Universe.
+   an age badge, and its title links to a working `/view/` page. Verify it
+   does NOT appear in `/`, `/api/documents`, search, or Universe — sparks
+   stay out of those projections by curation, not by access control.
 4. After the backfill (or after capturing a spark semantically close to an
    existing note), the 碰撞流 shows a pair with connection text and an open
-   question; 确认 / 忽略 update the verdict and dismissed items collapse.
-5. On a document page, the collision section renders only when the browser
-   already holds the edit token; it never prompts and never renders for
-   anonymous visitors.
+   question; 确认 / 忽略 update the verdict (token prompt on first use) and
+   dismissed items collapse.
+5. On a document page, the collision section renders for every visitor
+   whenever the document has collisions.
 
 ## Rollback
 
@@ -250,9 +259,11 @@ Report back with:
 - release patch checksum (or commit, if the owner committed first);
 - Go test / coverage-gate / frontend test / Next.js build results;
 - schema verification output (`kind` column, `collisions` table);
-- anonymous-access results for `/api/sparks` and `/api/collisions`;
+- anonymous-access results: reads on `/api/sparks` and `/api/collisions` are
+  public, writes (`/api/collisions/{id}`, `/api/recollide`) reject anonymous;
 - `/api/recollide` queued count and final collision row counts by verdict;
-- UI acceptance result, including the anonymous-invisibility checks;
+- UI acceptance result, including the projection-exclusion checks (sparks
+  stay out of feed, search, and Universe);
 - whether the old checkout remains ready for rollback.
 
 Do not include environment files, DSNs, edit tokens, API keys, or other
@@ -260,7 +271,7 @@ secrets in the report.
 
 ## Suggested skills
 
-- `diagnose`: use if the migration, collision backfill, or privacy-gate
+- `diagnose`: use if the migration, collision backfill, or access-behavior
   verification fails; separate schema state, runtime configuration, and
   process ownership before changing code.
 - `review`: use if the uncommitted release patch should first become a

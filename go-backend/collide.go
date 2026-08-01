@@ -7,9 +7,9 @@ package main
 // written by the model; without a key the bare score pair is still stored.
 // Humans then curate pairs via POST /api/collisions/{id} (confirmed/dismissed).
 //
-// Sparks (kind='fleeting') participate in collisions but stay private:
-// /api/sparks requires the edit token and /api/collisions only shows
-// anonymous callers pairs where both sides are published.
+// Sparks (kind='fleeting') participate in collisions and are public like
+// everything else: this is a personal space, and any multi-tenancy gate
+// lives at the ingress/proxy layer, not inside the app.
 //
 // Runs on a background queue (same keyedJobQueue pattern as classify.go),
 // chained from doEmbed so collisions always run against the fresh vector.
@@ -227,13 +227,10 @@ type sparkItem struct {
 }
 
 // handleSparks serves GET /api/sparks — fleeting notes, newest first, with
-// their collision counts. Sparks are private: edit token required.
+// their collision counts.
 func handleSparks(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		httpError(w, fmt.Errorf("method not allowed"), http.StatusMethodNotAllowed)
-		return
-	}
-	if !requireEditAccess(w, r) {
 		return
 	}
 	rows, err := db.Query(`
@@ -280,8 +277,7 @@ type collisionItem struct {
 }
 
 // handleCollisions serves GET /api/collisions — newest 50 pairs, optionally
-// filtered to one slug with ?slug=x. Privacy rule: without the edit token
-// only pairs where both sides are published are visible.
+// filtered to one slug with ?slug=x.
 func handleCollisions(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		httpError(w, fmt.Errorf("method not allowed"), http.StatusMethodNotAllowed)
@@ -294,10 +290,9 @@ func handleCollisions(w http.ResponseWriter, r *http.Request) {
 		FROM collisions c
 		JOIN documents a ON a.slug=c.slug_a
 		JOIN documents b ON b.slug=c.slug_b
-		WHERE ($1 OR (a.published AND b.published))
-			AND ($2='' OR c.slug_a=$2 OR c.slug_b=$2)
+		WHERE ($1='' OR c.slug_a=$1 OR c.slug_b=$1)
 		ORDER BY c.created_at DESC, c.id DESC
-		LIMIT 50`, hasEditAccess(r), slug)
+		LIMIT 50`, slug)
 	if err != nil {
 		httpError(w, err, http.StatusInternalServerError)
 		return

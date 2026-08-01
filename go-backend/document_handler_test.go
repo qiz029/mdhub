@@ -38,6 +38,35 @@ func TestGetDocumentHidesDraftWithoutEditAccess(t *testing.T) {
 	}
 }
 
+func TestGetDocumentReturnsFleetingDraftWithoutEditAccess(t *testing.T) {
+	mock := withMockDatabase(t)
+	previousToken, previousAddress := editToken, listenAddr
+	editToken, listenAddr = "secret", "127.0.0.1:10002"
+	t.Cleanup(func() { editToken, listenAddr = previousToken, previousAddress })
+	mock.ExpectQuery("SELECT slug, file_path, title, raw_content").
+		WithArgs("_sparks/1").
+		WillReturnRows(sqlmock.NewRows([]string{
+			"slug", "file_path", "title", "raw_content", "excerpt", "word_count",
+			"published", "kind", "source", "category_path", "file_mtime",
+		}).AddRow("_sparks/1", "", "Spark", "idea", "idea", 4, false, "fleeting", "user", "", time.Now()))
+	mock.ExpectQuery("SELECT tag FROM document_tags").
+		WithArgs("_sparks/1").WillReturnRows(sqlmock.NewRows([]string{"tag"}))
+	mock.ExpectQuery("SELECT source_slug FROM backlinks").
+		WithArgs("_sparks/1").WillReturnRows(sqlmock.NewRows([]string{"source_slug"}))
+
+	// no edit token: sparks are publicly readable even when unpublished
+	request := httptest.NewRequest(http.MethodGet, "/api/documents/_sparks/1", nil)
+	response := httptest.NewRecorder()
+	getDocument(response, request, "_sparks/1")
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", response.Code)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestGetDocumentReturnsDraftWithEditAccess(t *testing.T) {
 	mock := withMockDatabase(t)
 	previousToken, previousAddress := editToken, listenAddr

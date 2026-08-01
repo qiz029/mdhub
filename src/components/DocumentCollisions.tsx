@@ -4,20 +4,15 @@ import Link from "next/link";
 import { useEffect, useState } from "react";
 import { viewHref, type Collision } from "@/lib/sparks";
 
-// Collision pairs involving the current document. Privacy rule: this section
-// only reads a token that is already in sessionStorage — it never prompts,
-// and renders nothing for anonymous visitors so spark-side information never
-// leaks onto the public reading page.
+// Collision pairs involving the current document. Reads are public (personal
+// space; auth is handled at the edge), so this renders for every visitor
+// whenever the document has collisions.
 export function DocumentCollisions({ slug }: { slug: string }) {
   const [items, setItems] = useState<Collision[] | null>(null);
 
   useEffect(() => {
-    const token = sessionStorage.getItem("mdhub-edit-token");
-    if (!token) return;
     let cancelled = false;
-    fetch(`/mdhub/api/collisions?slug=${encodeURIComponent(slug)}`, {
-      headers: { "X-MDHub-Edit-Token": token },
-    })
+    fetch(`/mdhub/api/collisions?slug=${encodeURIComponent(slug)}`)
       .then((res) => (res.ok ? res.json() : []))
       .then((data: Collision[]) => {
         if (!cancelled) setItems(data);

@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 import {
   isStranded,
   sparkAgeLabel,
@@ -15,8 +15,30 @@ import {
 
 const TOKEN_KEY = "mdhub-edit-token";
 
-function authHeaders(token: string): HeadersInit {
-  return { "X-MDHub-Edit-Token": token };
+// Reads are public (personal space; auth is handled at the edge). The edit
+// token is only needed for writes — capture and verdicts — and is fetched
+// lazily: use the cached token or prompt, and on a 401 drop the cached token
+// and prompt once more before giving up.
+async function fetchWithEditToken(
+  input: string,
+  init: RequestInit,
+): Promise<Response> {
+  let lastRes: Response | null = null;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    let token = sessionStorage.getItem(TOKEN_KEY) || "";
+    if (!token) {
+      token = window.prompt("输入 MDHub 编辑令牌") || "";
+      if (!token) throw new Error("需要编辑令牌，已取消");
+      sessionStorage.setItem(TOKEN_KEY, token);
+    }
+    lastRes = await fetch(input, {
+      ...init,
+      headers: { ...init.headers, "X-MDHub-Edit-Token": token },
+    });
+    if (lastRes.status !== 401) return lastRes;
+    sessionStorage.removeItem(TOKEN_KEY);
+  }
+  return lastRes!;
 }
 
 function verdictLabel(verdict: CollisionVerdict): string {
@@ -94,54 +116,24 @@ function CollisionCard({
 }
 
 export function SparksClient() {
-  const [ready, setReady] = useState(false);
-  const [token, setToken] = useState<string | null>(null);
   const [sparks, setSparks] = useState<Spark[]>([]);
   const [collisions, setCollisions] = useState<Collision[]>([]);
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [draft, setDraft] = useState("");
   const [saving, setSaving] = useState(false);
   const [showDismissed, setShowDismissed] = useState(false);
 
   useEffect(() => {
-    const stored = sessionStorage.getItem(TOKEN_KEY);
-    if (stored) setToken(stored);
-    setReady(true);
-  }, []);
-
-  function dropToken() {
-    sessionStorage.removeItem(TOKEN_KEY);
-    setToken(null);
-  }
-
-  const reloadSparks = useCallback(async (currentToken: string) => {
-    const res = await fetch("/mdhub/api/sparks", {
-      headers: authHeaders(currentToken),
-    });
-    if (res.status === 401) {
-      dropToken();
-      return;
-    }
-    if (!res.ok) throw new Error(`加载碎片失败（HTTP ${res.status}）`);
-    setSparks((await res.json()) as Spark[]);
-  }, []);
-
-  useEffect(() => {
-    if (!token) return;
     let cancelled = false;
     async function load() {
       setLoading(true);
       setError("");
       try {
         const [sparksRes, collisionsRes] = await Promise.all([
-          fetch("/mdhub/api/sparks", { headers: authHeaders(token!) }),
-          fetch("/mdhub/api/collisions", { headers: authHeaders(token!) }),
+          fetch("/mdhub/api/sparks"),
+          fetch("/mdhub/api/collisions"),
         ]);
-        if (sparksRes.status === 401 || collisionsRes.status === 401) {
-          if (!cancelled) dropToken();
-          return;
-        }
         if (!sparksRes.ok || !collisionsRes.ok) {
           throw new Error(
             `加载失败（HTTP ${sparksRes.status}/${collisionsRes.status}）`,
@@ -169,18 +161,11 @@ export function SparksClient() {
     return () => {
       cancelled = true;
     };
-  }, [token]);
-
-  function enterToken() {
-    const value = window.prompt("输入 MDHub 编辑令牌") || "";
-    if (!value) return;
-    sessionStorage.setItem(TOKEN_KEY, value);
-    setToken(value);
-  }
+  }, []);
 
   async function capture() {
     const text = draft.trim();
-    if (!text || saving || !token) return;
+    if (!text || saving) return;
     setSaving(true);
     setError("");
     try {
@@ -192,18 +177,11 @@ export function SparksClient() {
           .split("/")
           .map((part) => encodeURIComponent(part))
           .join("/");
-      const res = await fetch(endpoint, {
+      const res = await fetchWithEditToken(endpoint, {
         method: "PUT",
-        headers: {
-          "Content-Type": "text/markdown; charset=utf-8",
-          "X-MDHub-Edit-Token": token,
-        },
+        headers: { "Content-Type": "text/markdown; charset=utf-8" },
         body: sparkMarkdown(text, now),
       });
-      if (res.status === 401) {
-        dropToken();
-        return;
-      }
       if (!res.ok) {
         const result = (await res.json().catch(() => ({}))) as {
           error?: string;
@@ -211,7 +189,8 @@ export function SparksClient() {
         throw new Error(result.error || `保存失败（HTTP ${res.status}）`);
       }
       setDraft("");
-      await reloadSparks(token);
+      const sparksRes = await fetch("/mdhub/api/sparks");
+      if (sparksRes.ok) setSparks((await sparksRes.json()) as Spark[]);
     } catch (saveError) {
       setError(saveError instanceof Error ? saveError.message : "保存失败");
     } finally {
@@ -220,24 +199,16 @@ export function SparksClient() {
   }
 
   async function changeVerdict(id: number, verdict: CollisionVerdict) {
-    if (!token) return;
     const previous = collisions;
     setCollisions((items) =>
       items.map((item) => (item.id === id ? { ...item, verdict } : item)),
     );
     try {
-      const res = await fetch(`/mdhub/api/collisions/${id}`, {
+      const res = await fetchWithEditToken(`/mdhub/api/collisions/${id}`, {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "X-MDHub-Edit-Token": token,
-        },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ verdict }),
       });
-      if (res.status === 401) {
-        dropToken();
-        return;
-      }
       if (!res.ok) throw new Error(`更新失败（HTTP ${res.status}）`);
     } catch (verdictError) {
       setCollisions(previous);
@@ -245,26 +216,6 @@ export function SparksClient() {
         verdictError instanceof Error ? verdictError.message : "更新失败",
       );
     }
-  }
-
-  if (!ready) return null;
-
-  if (!token) {
-    return (
-      <section className="rounded-2xl border border-stone-200 bg-stone-50 px-6 py-16 text-center">
-        <p className="font-medium text-stone-700">Sparks 是私密的</p>
-        <p className="mt-2 text-sm text-stone-400">
-          输入编辑令牌后才能查看碎片和碰撞。
-        </p>
-        <button
-          type="button"
-          onClick={enterToken}
-          className="mt-5 rounded-md bg-stone-900 px-4 py-2.5 text-sm font-medium text-white hover:opacity-85"
-        >
-          输入编辑令牌
-        </button>
-      </section>
-    );
   }
 
   const nowMs = Date.now();
@@ -305,7 +256,7 @@ export function SparksClient() {
             {saving ? "保存中…" : "捕获"}
           </button>
           <span className="text-xs text-stone-400">
-            保存为 _sparks/ 下的私密碎片（type: fleeting）
+            保存为 _sparks/ 下的碎片（type: fleeting），需编辑令牌
           </span>
         </div>
       </section>
@@ -381,9 +332,12 @@ export function SparksClient() {
                 className="rounded-xl border border-stone-200 bg-white p-4"
               >
                 <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-                  <span className="min-w-0 flex-1 truncate text-sm font-medium text-stone-800">
+                  <Link
+                    href={viewHref(spark.slug)}
+                    className="min-w-0 flex-1 truncate text-sm font-medium text-stone-800 hover:underline"
+                  >
                     {spark.title}
-                  </span>
+                  </Link>
                   <span className="rounded-full bg-stone-100 px-2 py-0.5 text-xs text-stone-500">
                     {sparkAgeLabel(spark.updated, nowMs)}
                   </span>

@@ -70,7 +70,7 @@ func TestPublishDocumentUpdatesProjectionsAfterCommit(t *testing.T) {
 	}
 }
 
-func TestPublishDocumentFleetingStaysPrivateButEnqueuesEmbed(t *testing.T) {
+func TestPublishDocumentFleetingStaysOutOfSearchIndexButEnqueuesEmbed(t *testing.T) {
 	mock := withMockDatabase(t)
 	isolatePublicationState(t)
 	embedBaseURL = "http://embed"

@@ -235,28 +235,16 @@ func TestDoEmbedChainsIntoCollisionQueue(t *testing.T) {
 	}
 }
 
-func TestHandleSparksRequiresEditToken(t *testing.T) {
-	withMockDatabase(t)
-	isolateEditAccess(t)
-
-	response := httptest.NewRecorder()
-	handleSparks(response, httptest.NewRequest(http.MethodGet, "/api/sparks", nil))
-	if response.Code != http.StatusUnauthorized {
-		t.Fatalf("status = %d, want 401", response.Code)
-	}
-}
-
-func TestHandleSparksListsFleetingNotesWithCollisionCounts(t *testing.T) {
+func TestHandleSparksServesAnonymousGet(t *testing.T) {
 	mock := withMockDatabase(t)
 	isolateEditAccess(t)
 	mock.ExpectQuery("FROM documents").
 		WillReturnRows(sqlmock.NewRows([]string{"slug", "title", "excerpt", "file_mtime", "collisions"}).
 			AddRow("_sparks/1", "Spark", "idea", time.Unix(100, 0), 3))
 
-	request := httptest.NewRequest(http.MethodGet, "/api/sparks", nil)
-	request.Header.Set("X-MDHub-Edit-Token", "secret")
+	// no edit token: sparks are public
 	response := httptest.NewRecorder()
-	handleSparks(response, request)
+	handleSparks(response, httptest.NewRequest(http.MethodGet, "/api/sparks", nil))
 
 	if response.Code != http.StatusOK ||
 		!strings.Contains(response.Body.String(), `"slug":"_sparks/1"`) ||
@@ -268,7 +256,7 @@ func TestHandleSparksListsFleetingNotesWithCollisionCounts(t *testing.T) {
 	}
 }
 
-func TestHandleCollisionsPrivacyFilter(t *testing.T) {
+func TestHandleCollisionsPublicRead(t *testing.T) {
 	columns := []string{
 		"id", "slug_a", "slug_b", "title_a", "title_b",
 		"score", "explanation", "question", "verdict", "created_at",
@@ -277,13 +265,14 @@ func TestHandleCollisionsPrivacyFilter(t *testing.T) {
 		int64(7), "a", "b", "A", "B", 0.9, "conn", "q", "new", time.Unix(100, 0),
 	}
 
-	t.Run("anonymous passes published-only filter", func(t *testing.T) {
+	t.Run("anonymous sees every collision", func(t *testing.T) {
 		mock := withMockDatabase(t)
 		isolateEditAccess(t)
 		mock.ExpectQuery("FROM collisions").
-			WithArgs(false, "").
+			WithArgs("").
 			WillReturnRows(sqlmock.NewRows(columns).AddRow(row...))
 
+		// no edit token: the full collision list is public
 		response := httptest.NewRecorder()
 		handleCollisions(response, httptest.NewRequest(http.MethodGet, "/api/collisions", nil))
 		if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"id":7`) {
@@ -294,17 +283,15 @@ func TestHandleCollisionsPrivacyFilter(t *testing.T) {
 		}
 	})
 
-	t.Run("edit token lifts the filter and passes slug", func(t *testing.T) {
+	t.Run("slug filter", func(t *testing.T) {
 		mock := withMockDatabase(t)
 		isolateEditAccess(t)
 		mock.ExpectQuery("FROM collisions").
-			WithArgs(true, "a").
+			WithArgs("a").
 			WillReturnRows(sqlmock.NewRows(columns).AddRow(row...))
 
-		request := httptest.NewRequest(http.MethodGet, "/api/collisions?slug=a", nil)
-		request.Header.Set("X-MDHub-Edit-Token", "secret")
 		response := httptest.NewRecorder()
-		handleCollisions(response, request)
+		handleCollisions(response, httptest.NewRequest(http.MethodGet, "/api/collisions?slug=a", nil))
 		if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"slug_a":"a"`) {
 			t.Fatalf("response = %d %q", response.Code, response.Body.String())
 		}

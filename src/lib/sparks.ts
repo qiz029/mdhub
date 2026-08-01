@@ -1,7 +1,7 @@
-// Sparks: fleeting notes (`type: fleeting` frontmatter) captured quickly and
-// kept private, plus the collision pairs the backend engine records between
-// them and the rest of the library. Pure helpers live here so they can be
-// unit-tested without a DOM.
+// Sparks: fleeting notes (`type: fleeting` frontmatter) captured quickly,
+// plus the collision pairs the backend engine records between them and the
+// rest of the library. Pure helpers live here so they can be unit-tested
+// without a DOM.
 
 export type Spark = {
   slug: string;
