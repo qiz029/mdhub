@@ -146,12 +146,23 @@ func currentRelatedDocuments(slug string, limit int) []relatedDocument {
 // the API returns stable cluster IDs for the same graph.
 func semanticClusterAssignments(nodes []universeNode, edges []universeEdge) map[string]int {
 	assignments := make(map[string]int, len(nodes))
+	for _, node := range nodes {
+		assignments[node.ID] = -1
+	}
+	adjacency, degrees, totalWeight := semanticAdjacency(nodes, edges)
+	if totalWeight == 0 {
+		return assignments
+	}
+	communities := moveSemanticCommunities(nodes, adjacency, degrees, totalWeight)
+	assignStableClusterIDs(assignments, nodes, degrees, communities)
+	return assignments
+}
+
+func semanticAdjacency(nodes []universeNode, edges []universeEdge) ([][]weightedNeighbour, []float64, float64) {
 	indexByID := make(map[string]int, len(nodes))
 	for i, node := range nodes {
 		indexByID[node.ID] = i
-		assignments[node.ID] = -1
 	}
-
 	adjacency := make([][]weightedNeighbour, len(nodes))
 	degrees := make([]float64, len(nodes))
 	for _, edge := range edges {
@@ -170,10 +181,10 @@ func semanticClusterAssignments(nodes []universeNode, edges []universeEdge) map[
 	for _, degree := range degrees {
 		totalWeight += degree
 	}
-	if totalWeight == 0 {
-		return assignments
-	}
+	return adjacency, degrees, totalWeight
+}
 
+func moveSemanticCommunities(nodes []universeNode, adjacency [][]weightedNeighbour, degrees []float64, totalWeight float64) []int {
 	communities := make([]int, len(nodes))
 	communityTotals := append([]float64(nil), degrees...)
 	for i := range communities {
@@ -187,30 +198,7 @@ func semanticClusterAssignments(nodes []universeNode, edges []universeEdge) map[
 			if !node.Embedded || degrees[nodeIndex] == 0 {
 				continue
 			}
-			current := communities[nodeIndex]
-			communityTotals[current] -= degrees[nodeIndex]
-
-			weights := make(map[int]float64, len(adjacency[nodeIndex]))
-			for _, neighbour := range adjacency[nodeIndex] {
-				weights[communities[neighbour.index]] += neighbour.weight
-			}
-			candidates := make([]int, 0, len(weights))
-			for candidate := range weights {
-				candidates = append(candidates, candidate)
-			}
-			sort.Ints(candidates)
-
-			best := current
-			bestGain := 0.0
-			for _, candidate := range candidates {
-				gain := weights[candidate] - degrees[nodeIndex]*communityTotals[candidate]/totalWeight
-				if gain > bestGain+epsilon ||
-					(gain > epsilon && gain >= bestGain-epsilon && candidate < best) {
-					best = candidate
-					bestGain = gain
-				}
-			}
-
+			current, best := bestSemanticCommunity(nodeIndex, communities, communityTotals, adjacency, degrees, totalWeight, epsilon)
 			communities[nodeIndex] = best
 			communityTotals[best] += degrees[nodeIndex]
 			if best != current {
@@ -221,7 +209,33 @@ func semanticClusterAssignments(nodes []universeNode, edges []universeEdge) map[
 			break
 		}
 	}
+	return communities
+}
 
+func bestSemanticCommunity(nodeIndex int, communities []int, communityTotals []float64, adjacency [][]weightedNeighbour, degrees []float64, totalWeight, epsilon float64) (int, int) {
+	current := communities[nodeIndex]
+	communityTotals[current] -= degrees[nodeIndex]
+	weights := make(map[int]float64, len(adjacency[nodeIndex]))
+	for _, neighbour := range adjacency[nodeIndex] {
+		weights[communities[neighbour.index]] += neighbour.weight
+	}
+	candidates := make([]int, 0, len(weights))
+	for candidate := range weights {
+		candidates = append(candidates, candidate)
+	}
+	sort.Ints(candidates)
+	best, bestGain := current, 0.0
+	for _, candidate := range candidates {
+		gain := weights[candidate] - degrees[nodeIndex]*communityTotals[candidate]/totalWeight
+		if gain > bestGain+epsilon ||
+			(gain > epsilon && gain >= bestGain-epsilon && candidate < best) {
+			best, bestGain = candidate, gain
+		}
+	}
+	return current, best
+}
+
+func assignStableClusterIDs(assignments map[string]int, nodes []universeNode, degrees []float64, communities []int) {
 	members := make(map[int][]string)
 	for i, node := range nodes {
 		if !node.Embedded || degrees[i] == 0 {
@@ -244,7 +258,6 @@ func semanticClusterAssignments(nodes []universeNode, edges []universeEdge) map[
 			assignments[id] = cluster
 		}
 	}
-	return assignments
 }
 
 func buildSemanticUniverse(docs []universeDocument, vectors map[string][]float32, neighbours int) universeGraph {
@@ -252,38 +265,58 @@ func buildSemanticUniverse(docs []universeDocument, vectors map[string][]float32
 		neighbours = 1
 	}
 
-	sortedDocs := append([]universeDocument(nil), docs...)
-	sort.Slice(sortedDocs, func(i, j int) bool { return sortedDocs[i].Slug < sortedDocs[j].Slug })
-
+	sortedDocs := sortedUniverseDocuments(docs)
+	nodes, embeddedDocuments := universeNodes(sortedDocs, vectors)
 	graph := universeGraph{
-		Nodes: make([]universeNode, 0, len(sortedDocs)),
-		Edges: []universeEdge{},
-		Meta:  universeMeta{Documents: len(sortedDocs), Neighbours: neighbours},
+		Nodes: nodes,
+		Meta: universeMeta{
+			Documents: len(sortedDocs), EmbeddedDocuments: embeddedDocuments, Neighbours: neighbours,
+		},
 	}
-	for _, doc := range sortedDocs {
+	nearest := nearestSemanticNeighbours(sortedDocs, vectors, neighbours)
+	graph.Edges = mutualSemanticEdges(sortedDocs, nearest)
+	graph.Edges = connectIsolatedSemanticDocuments(sortedDocs, nearest, graph.Edges)
+	sortSemanticEdges(graph.Edges)
+	decorateUniverseGraph(&graph)
+	return graph
+}
+
+func sortedUniverseDocuments(docs []universeDocument) []universeDocument {
+	sorted := append([]universeDocument(nil), docs...)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Slug < sorted[j].Slug })
+	return sorted
+}
+
+func universeNodes(docs []universeDocument, vectors map[string][]float32) ([]universeNode, int) {
+	nodes := make([]universeNode, 0, len(docs))
+	embeddedDocuments := 0
+	for _, doc := range docs {
 		embedded := len(vectors[doc.Slug]) > 0
 		if embedded {
-			graph.Meta.EmbeddedDocuments++
+			embeddedDocuments++
 		}
 		tags := append([]string(nil), doc.Tags...)
 		if tags == nil {
 			tags = []string{}
 		}
-		graph.Nodes = append(graph.Nodes, universeNode{
+		nodes = append(nodes, universeNode{
 			ID: doc.Slug, Title: doc.Title, Excerpt: doc.Excerpt,
 			Category: doc.Category, Tags: tags, Updated: doc.Updated,
 			Embedded: embedded, WordCount: doc.WordCount,
 		})
 	}
+	return nodes, embeddedDocuments
+}
 
-	nearest := make(map[string][]semanticNeighbour, len(sortedDocs))
-	for i, left := range sortedDocs {
+func nearestSemanticNeighbours(docs []universeDocument, vectors map[string][]float32, limit int) map[string][]semanticNeighbour {
+	nearest := make(map[string][]semanticNeighbour, len(docs))
+	for i, left := range docs {
 		leftVec := vectors[left.Slug]
 		if len(leftVec) == 0 {
 			continue
 		}
-		for j := i + 1; j < len(sortedDocs); j++ {
-			right := sortedDocs[j]
+		for j := i + 1; j < len(docs); j++ {
+			right := docs[j]
 			rightVec := vectors[right.Slug]
 			if len(rightVec) == 0 {
 				continue
@@ -303,11 +336,14 @@ func buildSemanticUniverse(docs []universeDocument, vectors map[string][]float32
 			}
 			return nearest[slug][i].slug < nearest[slug][j].slug
 		})
-		if len(nearest[slug]) > neighbours {
-			nearest[slug] = nearest[slug][:neighbours]
+		if len(nearest[slug]) > limit {
+			nearest[slug] = nearest[slug][:limit]
 		}
 	}
+	return nearest
+}
 
+func mutualSemanticEdges(docs []universeDocument, nearest map[string][]semanticNeighbour) []universeEdge {
 	top := make(map[string]map[string]float64, len(nearest))
 	for slug, candidates := range nearest {
 		top[slug] = make(map[string]float64, len(candidates))
@@ -315,7 +351,8 @@ func buildSemanticUniverse(docs []universeDocument, vectors map[string][]float32
 			top[slug][candidate.slug] = candidate.similarity
 		}
 	}
-	for _, left := range sortedDocs {
+	edges := make([]universeEdge, 0)
+	for _, left := range docs {
 		for right, similarity := range top[left.Slug] {
 			if left.Slug >= right {
 				continue
@@ -323,14 +360,18 @@ func buildSemanticUniverse(docs []universeDocument, vectors map[string][]float32
 			if _, mutual := top[right][left.Slug]; !mutual {
 				continue
 			}
-			graph.Edges = append(graph.Edges, universeEdge{
+			edges = append(edges, universeEdge{
 				Source: left.Slug, Target: right, Kind: "semantic", Similarity: similarity,
 			})
 		}
 	}
-	edgeKeys := make(map[string]bool, len(graph.Edges))
-	degree := make(map[string]int, len(sortedDocs))
-	for _, edge := range graph.Edges {
+	return edges
+}
+
+func connectIsolatedSemanticDocuments(docs []universeDocument, nearest map[string][]semanticNeighbour, edges []universeEdge) []universeEdge {
+	edgeKeys := make(map[string]bool, len(edges))
+	degree := make(map[string]int, len(docs))
+	for _, edge := range edges {
 		edgeKeys[edge.Source+"\x00"+edge.Target] = true
 		degree[edge.Source]++
 		degree[edge.Target]++
@@ -338,7 +379,7 @@ func buildSemanticUniverse(docs []universeDocument, vectors map[string][]float32
 	// Mutual Top-K keeps the graph sparse, but it can strand a document whose
 	// nearest neighbour prefers somebody else. Give each embedded document at
 	// least its strongest available relationship.
-	for _, doc := range sortedDocs {
+	for _, doc := range docs {
 		if degree[doc.Slug] > 0 || len(nearest[doc.Slug]) == 0 {
 			continue
 		}
@@ -351,23 +392,29 @@ func buildSemanticUniverse(docs []universeDocument, vectors map[string][]float32
 		if edgeKeys[key] {
 			continue
 		}
-		graph.Edges = append(graph.Edges, universeEdge{
+		edges = append(edges, universeEdge{
 			Source: source, Target: target, Kind: "semantic", Similarity: candidate.similarity,
 		})
 		edgeKeys[key] = true
 		degree[source]++
 		degree[target]++
 	}
-	sort.Slice(graph.Edges, func(i, j int) bool {
-		if graph.Edges[i].Similarity != graph.Edges[j].Similarity {
-			return graph.Edges[i].Similarity > graph.Edges[j].Similarity
-		}
-		if graph.Edges[i].Source != graph.Edges[j].Source {
-			return graph.Edges[i].Source < graph.Edges[j].Source
-		}
-		return graph.Edges[i].Target < graph.Edges[j].Target
-	})
+	return edges
+}
 
+func sortSemanticEdges(edges []universeEdge) {
+	sort.Slice(edges, func(i, j int) bool {
+		if edges[i].Similarity != edges[j].Similarity {
+			return edges[i].Similarity > edges[j].Similarity
+		}
+		if edges[i].Source != edges[j].Source {
+			return edges[i].Source < edges[j].Source
+		}
+		return edges[i].Target < edges[j].Target
+	})
+}
+
+func decorateUniverseGraph(graph *universeGraph) {
 	byID := make(map[string]int, len(graph.Nodes))
 	for i := range graph.Nodes {
 		byID[graph.Nodes[i].ID] = i
@@ -387,7 +434,6 @@ func buildSemanticUniverse(docs []universeDocument, vectors map[string][]float32
 		graph.Nodes[i].Cluster = clusters[graph.Nodes[i].ID]
 	}
 	graph.Meta.Edges = len(graph.Edges)
-	return graph
 }
 
 func markUniverseDirty() {

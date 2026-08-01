@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   aggregateClusterEdges,
+  deriveUniverseProjection,
   fitUniverseTransform,
   localDocumentEdges,
   selectedCrossClusterEdges,
@@ -34,6 +35,19 @@ const edges: UniverseEdge[] = [
   { source: "a", target: "c", kind: "semantic", similarity: 0.8 },
   { source: "b", target: "d", kind: "semantic", similarity: 0.7 },
 ];
+
+const graph = {
+  nodes,
+  edges,
+  meta: {
+    documents: 4,
+    embedded_documents: 4,
+    edges: 4,
+    neighbours: 4,
+    min_similarity: 0.7,
+    max_similarity: 0.9,
+  },
+};
 
 test("default document edges stay inside clusters", () => {
   assert.deepEqual(
@@ -89,4 +103,30 @@ test("fit transform uses the viewport for a compact graph without over-zooming",
     40,
   );
   assert.equal(transform.k, 1.35);
+});
+
+test("universe projection centralizes density, selection, search and metrics", () => {
+  const projection = deriveUniverseProjection(graph, "balanced", "a", "D");
+
+  assert.deepEqual(
+    projection.localEdges.map((edge) => `${edge.source}-${edge.target}`),
+    ["a-b", "c-d"],
+  );
+  assert.deepEqual(
+    projection.renderedEdges.map((edge) => `${edge.source}-${edge.target}`),
+    ["a-b", "c-d", "a-c"],
+  );
+  assert.equal(projection.selected?.id, "a");
+  assert.deepEqual(
+    projection.related.map(({ node }) => node.id),
+    ["b", "c"],
+  );
+  assert.deepEqual(projection.searchResults.map((item) => item.id), ["d"]);
+  assert.equal(projection.clusterCount, 2);
+  assert.equal(projection.coverage, 100);
+  assert.equal(
+    projection.layoutKey,
+    deriveUniverseProjection(graph, "balanced", "d", "other").layoutKey,
+    "selection and search must not invalidate the force layout",
+  );
 });

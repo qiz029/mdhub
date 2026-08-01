@@ -34,10 +34,21 @@ func isReservedUploadPath(key string) bool {
 
 func runImport(dir string) {
 	vaultDir = dir
-	var docs, images, threads, replies int
+	files := scanVaultFiles()
+	docs := importVaultDocuments(files)
+	images, err := importVaultImages(filepath.Clean(vaultDir))
+	if err != nil {
+		log.Printf("walk vault images: %v", err)
+	}
+	threads, replies := importVaultComments(files)
 
-	// documents — everything except _comments/
-	for _, fp := range scanVaultFiles() {
+	fmt.Printf("import done: %d docs, %d images, %d comment threads, %d replies\n",
+		docs, images, threads, replies)
+}
+
+func importVaultDocuments(files []string) int {
+	documents := 0
+	for _, fp := range files {
 		if isCommentsFile(fp) {
 			continue
 		}
@@ -46,20 +57,20 @@ func runImport(dir string) {
 			log.Printf("parse %s: %v", fp, err)
 			continue
 		}
-		upsert(doc)
-		if doc.Published && !doc.CategoryManual && doc.CategoryPath == "" {
-			enqueueInsert(doc.Slug)
+		if err := publishDocument(doc); err != nil {
+			log.Printf("import document %s: %v", doc.Slug, err)
+			continue
 		}
-		if doc.Published {
-			enqueueEmbed(doc.Slug)
-		}
-		docs++
+		documents++
 	}
+	return documents
+}
 
-	// images
-	root := filepath.Clean(vaultDir)
-	filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
-		if err != nil {
+func importVaultImages(root string) (int, error) {
+	images := 0
+	err := filepath.WalkDir(root, func(p string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			log.Printf("walk image %s: %v", p, walkErr)
 			return nil
 		}
 		if d.IsDir() {
@@ -96,9 +107,12 @@ func runImport(dir string) {
 		images++
 		return nil
 	})
+	return images, err
+}
 
-	// comments — only for slugs that exist in documents (FK constraint)
-	for _, fp := range scanVaultFiles() {
+func importVaultComments(files []string) (int, int) {
+	threads, replies := 0, 0
+	for _, fp := range files {
 		if !isCommentsFile(fp) {
 			continue
 		}
@@ -108,18 +122,23 @@ func runImport(dir string) {
 		}
 		slug := commentSlug(fp, string(raw))
 		var exists bool
-		db.QueryRow("SELECT EXISTS(SELECT 1 FROM documents WHERE slug=$1)", slug).Scan(&exists)
+		if err := db.QueryRow("SELECT EXISTS(SELECT 1 FROM documents WHERE slug=$1)", slug).Scan(&exists); err != nil {
+			log.Printf("check comments document %s: %v", slug, err)
+			continue
+		}
 		if !exists {
 			log.Printf("skip comments for unknown doc: %s", slug)
 			continue
 		}
-		t, r := importComments(slug, string(raw))
+		t, r, err := importComments(slug, string(raw))
+		if err != nil {
+			log.Printf("import comments %s: %v", slug, err)
+			continue
+		}
 		threads += t
 		replies += r
 	}
-
-	fmt.Printf("import done: %d docs, %d images, %d comment threads, %d replies\n",
-		docs, images, threads, replies)
+	return threads, replies
 }
 
 // isCommentsFile reports whether fp lives in the vault's _comments/ dir.
@@ -148,39 +167,35 @@ func commentSlug(fp, raw string) string {
 	return strings.TrimSuffix(filepath.ToSlash(rel), ".md")
 }
 
-// importComments replaces all comment threads of a slug with the parsed
-// content of its _comments file. Returns thread and reply counts.
-func importComments(slug, raw string) (threads, replies int) {
+// importComments atomically replaces every comment thread for a document with
+// the parsed sidecar state. An empty sidecar intentionally clears old threads.
+func importComments(slug, raw string) (threads, replies int, err error) {
 	parsed := parseCommentThreads(raw)
-	if len(parsed) == 0 {
-		return 0, 0
-	}
 	tx, err := db.Begin()
 	if err != nil {
-		log.Printf("comments tx: %v", err)
-		return 0, 0
+		return 0, 0, fmt.Errorf("begin comments transaction: %w", err)
 	}
 	defer tx.Rollback()
 
 	// delete-then-insert keeps re-runs idempotent (entries cascade)
 	if _, err := tx.Exec("DELETE FROM comment_threads WHERE slug=$1", slug); err != nil {
-		log.Printf("clear comments %s: %v", slug, err)
-		return 0, 0
+		return 0, 0, fmt.Errorf("clear comments: %w", err)
 	}
 	for _, t := range parsed {
+		if len(t.entries) == 0 {
+			return 0, 0, fmt.Errorf("comment thread %s has no entries", t.id)
+		}
 		created := t.entries[0].at
 		if _, err := tx.Exec(`
 			INSERT INTO comment_threads (id, slug, quote, prefix, suffix, created_at)
 			VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT (id) DO NOTHING`,
 			t.id, slug, t.quote, t.prefix, t.suffix, created); err != nil {
-			log.Printf("insert thread %s: %v", t.id, err)
-			continue
+			return 0, 0, fmt.Errorf("insert thread %s: %w", t.id, err)
 		}
 		for i, e := range t.entries {
 			if _, err := tx.Exec("INSERT INTO comment_entries (thread_id, author, text, created_at) VALUES ($1,$2,$3,$4)",
 				t.id, e.author, e.text, e.at); err != nil {
-				log.Printf("insert entry %s: %v", t.id, err)
-				continue
+				return 0, 0, fmt.Errorf("insert entry for thread %s: %w", t.id, err)
 			}
 			if i > 0 {
 				replies++
@@ -188,8 +203,10 @@ func importComments(slug, raw string) (threads, replies int) {
 		}
 		threads++
 	}
-	tx.Commit()
-	return threads, replies
+	if err := tx.Commit(); err != nil {
+		return 0, 0, fmt.Errorf("commit comments: %w", err)
+	}
+	return threads, replies, nil
 }
 
 // ---- comments markdown parser (Go port of src/lib/comments.ts) ----

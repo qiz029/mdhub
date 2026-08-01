@@ -29,7 +29,6 @@ import (
 	"net/http"
 	"sort"
 	"strings"
-	"sync"
 	"time"
 )
 
@@ -40,10 +39,7 @@ var (
 	llmAPIKey  = getEnv("MDHUB_LLM_API_KEY", "") // empty = classification disabled
 	llmModel   = getEnv("MDHUB_LLM_MODEL", "gpt-4o-mini")
 
-	treeQueue = make(chan treeJob, 500)
-	treeSeen  = map[string]bool{} // queue keys currently queued (dedup)
-	treeMu    sync.Mutex
-	treeWG    sync.WaitGroup // lets one-shot commands (e.g. -import) drain the queue before exit
+	treeJobs = newKeyedJobQueue[treeJob]("classify", 500)
 )
 
 // treeJob is one unit of categorization work: either inserting a note into
@@ -120,23 +116,7 @@ func enqueueTree(job treeJob, key string) {
 	if llmAPIKey == "" {
 		return
 	}
-	treeMu.Lock()
-	if treeSeen[key] {
-		treeMu.Unlock()
-		return
-	}
-	treeSeen[key] = true
-	treeMu.Unlock()
-
-	select {
-	case treeQueue <- job:
-		treeWG.Add(1)
-	default:
-		treeMu.Lock()
-		delete(treeSeen, key)
-		treeMu.Unlock()
-		log.Printf("classify queue full, dropped %s", key)
-	}
+	treeJobs.enqueue(key, job)
 }
 
 // startClassifier launches the background worker; no-op without an API key.
@@ -145,39 +125,19 @@ func startClassifier() {
 		log.Println("LLM classification disabled (MDHUB_LLM_API_KEY empty)")
 		return
 	}
-	go classifyWorker()
-}
-
-// classifyWorker consumes queued jobs sequentially. Failures are logged and
-// skipped — no retries beyond the single in-job prompt retry.
-func classifyWorker() {
 	client := &http.Client{Timeout: 30 * time.Second}
-	for job := range treeQueue {
-		treeMu.Lock()
+	treeJobs.start(func(job treeJob) error {
 		if job.split {
-			delete(treeSeen, "split:"+job.splitPath)
-		} else {
-			delete(treeSeen, job.slug)
+			return doSplit(job.splitPath, client)
 		}
-		treeMu.Unlock()
-
-		var err error
-		if job.split {
-			err = doSplit(job.splitPath, client)
-		} else {
-			err = doInsert(job.slug, client)
-		}
-		if err != nil {
-			log.Printf("classify %+v: %v", job, err)
-		}
-		treeWG.Done()
-	}
+		return doInsert(job.slug, client)
+	})
 }
 
 // waitClassify blocks until every queued job has finished. Used by one-shot
 // commands (-import) so results land before the process exits.
 func waitClassify() {
-	treeWG.Wait()
+	treeJobs.wait()
 }
 
 // ---- tree statistics ----

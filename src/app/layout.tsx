@@ -40,6 +40,8 @@ export default function RootLayout({
           rel="stylesheet"
           href="https://cdn.jsdelivr.net/npm/lxgw-wenkai-webfont@1.7.0/style.css"
         />
+        {/* Kept outside PostCSS until its parser accepts Custom Highlight syntax. */}
+        <link rel="stylesheet" href="/mdhub/custom-highlights.css" />
       </head>
       <body className="min-h-screen bg-white text-stone-900 antialiased">
         <script dangerouslySetInnerHTML={{ __html: BOOTSTRAP }} />

@@ -61,7 +61,8 @@ npm run dev        # → http://localhost:10001/mdhub
 brew install ollama && brew services start ollama
 ollama pull qwen3-embedding:0.6b
 # In go-backend/.env: MDHUB_EMBED_URL="http://localhost:11434", restart the backend, then:
-curl -X POST http://localhost:10002/api/reembed   # backfill existing notes
+curl -X POST -H "X-MDHub-Edit-Token: $MDHUB_EDIT_TOKEN" \
+  http://localhost:10002/api/reembed   # backfill existing notes
 ```
 
 ## Publishing a note
@@ -70,10 +71,12 @@ The primary way to publish is the write API — agents and scripts upload raw ma
 
 ```bash
 # Create or update a note (body is the full raw markdown; slug is chosen by the caller):
-curl -X PUT --data-binary @note.md http://localhost:10002/api/documents/translations/note
+curl -X PUT -H "X-MDHub-Edit-Token: $MDHUB_EDIT_TOKEN" \
+  --data-binary @note.md http://localhost:10002/api/documents/translations/note
 
 # Delete:
-curl -X DELETE http://localhost:10002/api/documents/translations/note
+curl -X DELETE -H "X-MDHub-Edit-Token: $MDHUB_EDIT_TOKEN" \
+  http://localhost:10002/api/documents/translations/note
 ```
 
 A note is publicly visible when its frontmatter has `publish: true`:
@@ -129,8 +132,8 @@ The home page lists all published notes, newest first. Each gets a URL at `/view
 | Variable | Default | Description |
 |---|---|---|
 | `MDHUB_PG` | `postgres://mdhub:***@localhost:5432/mdhub` | PostgreSQL DSN |
-| `MDHUB_LISTEN` | `:10002` | Listen address |
-| `MDHUB_EDIT_TOKEN` | _(unset = image uploads disabled)_ | Shared secret required by `POST /api/images` |
+| `MDHUB_LISTEN` | `127.0.0.1:10002` | Listen address; expose deliberately only behind an authenticated proxy |
+| `MDHUB_EDIT_TOKEN` | _(unset = loopback document writes only; image uploads disabled)_ | Shared secret for document/image/maintenance writes; mandatory for non-loopback listen addresses |
 | `MDHUB_LLM_BASE_URL` | `https://api.openai.com/v1` | OpenAI-compatible chat API base |
 | `MDHUB_LLM_API_KEY` | _(unset = disabled)_ | LLM API key |
 | `MDHUB_LLM_MODEL` | `gpt-4o-mini` | LLM model for categorization |

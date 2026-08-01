@@ -1,4 +1,4 @@
-import { API_URL } from "./config";
+import { API_URL } from "./config.ts";
 
 export type CommentEntry = {
   author: string;
@@ -41,6 +41,16 @@ export type NewComment = {
   reply?: string;
 };
 
+export class CommentAPIError extends Error {
+  readonly status: number;
+
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = "CommentAPIError";
+    this.status = status;
+  }
+}
+
 export async function appendComment(
   slug: string,
   c: NewComment,
@@ -62,13 +72,15 @@ export async function appendComment(
   );
   if (!res.ok) {
     let msg = `comment failed (${res.status})`;
-    try {
-      const data = await res.json();
-      if (data?.error) msg = String(data.error);
-    } catch {
-      // keep default message
+    if (res.status < 500) {
+      try {
+        const data = await res.json();
+        if (data?.error) msg = String(data.error);
+      } catch {
+        // Keep the bounded status message.
+      }
     }
-    throw new Error(msg);
+    throw new CommentAPIError(msg, res.status < 500 ? res.status : 502);
   }
   const data = await res.json();
   return { id: String(data.id) };

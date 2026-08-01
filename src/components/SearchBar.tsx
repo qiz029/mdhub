@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useRef, useEffect } from "react";
+import { parseSearchSnippet } from "@/lib/search-snippet";
 
 interface Result {
   slug: string;
@@ -94,10 +95,15 @@ export function SearchBar() {
                 {r.title}
               </div>
               {r.snippet && (
-                <div
-                  className="text-xs text-stone-500 mt-0.5 line-clamp-2"
-                  dangerouslySetInnerHTML={{ __html: r.snippet }}
-                />
+                <div className="text-xs text-stone-500 mt-0.5 line-clamp-2">
+                  {parseSearchSnippet(r.snippet).map((segment, index) =>
+                    segment.highlighted ? (
+                      <mark key={index}>{segment.text}</mark>
+                    ) : (
+                      <span key={index}>{segment.text}</span>
+                    ),
+                  )}
+                </div>
               )}
             </div>
           ))}

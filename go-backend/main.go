@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
 	"database/sql"
@@ -19,7 +20,7 @@ import (
 	"io"
 	"io/fs"
 	"log"
-	"math/rand/v2"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -70,7 +71,7 @@ func init() {
 var (
 	vaultDir   string // only used by the one-shot `-import` command
 	pgDSN      = getEnv("MDHUB_PG", "postgres://mdhub:mdhub@localhost:5432/mdhub?sslmode=disable")
-	listenAddr = getEnv("MDHUB_LISTEN", ":10002")
+	listenAddr = getEnv("MDHUB_LISTEN", "127.0.0.1:10002")
 	editToken  = getEnv("MDHUB_EDIT_TOKEN", "")
 	db         *sql.DB
 	mu         sync.RWMutex
@@ -134,6 +135,11 @@ func main() {
 	var err error
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
 	log.Println("starting mdhub-go")
+	if *importDir == "" {
+		if err := validateIngressConfig(listenAddr, editToken); err != nil {
+			log.Fatal(err)
+		}
+	}
 	db, err = sql.Open("postgres", pgDSN)
 	if err != nil {
 		log.Fatal("pg open:", err)
@@ -183,8 +189,17 @@ func main() {
 		w.Write([]byte("ok"))
 	})
 
+	server := &http.Server{
+		Addr:              listenAddr,
+		Handler:           mux,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      2 * time.Minute,
+		IdleTimeout:       60 * time.Second,
+		MaxHeaderBytes:    1 << 20,
+	}
 	log.Printf("mdhub-go listening on %s", listenAddr)
-	log.Fatal(http.ListenAndServe(listenAddr, mux))
+	log.Fatal(server.ListenAndServe())
 }
 
 // ---- vault scanner (used by the import command only) ----
@@ -227,31 +242,21 @@ func loadIndexFromDB() {
 		var e searchEntry
 		var mtime time.Time
 		if err := rows.Scan(&e.slug, &e.title, &e.display, &mtime); err != nil {
-			continue
+			log.Printf("scan search index: %v", err)
+			return
 		}
 		e.plain = strings.ToLower(e.display)
 		e.mtime = mtime.UnixMilli()
 		newIndex[e.slug] = &e
 	}
+	if err := rows.Err(); err != nil {
+		log.Printf("read search index: %v", err)
+		return
+	}
 	mu.Lock()
 	searchIndex = newIndex
 	mu.Unlock()
 	log.Printf("index loaded, %d published docs", len(newIndex))
-}
-
-// deleteDoc removes a document from PG (tags/backlinks/comments cascade)
-// and from the in-memory index. Callers must hold mu.
-func deleteDoc(slug string) {
-	res, err := db.Exec("DELETE FROM documents WHERE slug=$1", slug)
-	if err != nil {
-		log.Printf("delete %s: %v", slug, err)
-		return
-	}
-	delete(searchIndex, slug)
-	delete(embedIndex, slug)
-	if n, _ := res.RowsAffected(); n > 0 {
-		log.Printf("removed: %s", slug)
-	}
 }
 
 func parseFile(fp string) (*Document, error) {
@@ -273,8 +278,8 @@ func parseDoc(slug, filePath, raw string) *Document {
 
 	for _, line := range strings.Split(fm, "\n") {
 		line = strings.TrimSpace(line)
-		if strings.HasPrefix(line, "publish:") && strings.Contains(line, "true") {
-			published = true
+		if value, ok := frontmatterValue(line, "publish"); ok {
+			published = strings.EqualFold(strings.Trim(value, "\"'"), "true")
 		}
 		if strings.HasPrefix(line, "source:") {
 			source = strings.TrimSpace(strings.TrimPrefix(line, "source:"))
@@ -313,6 +318,18 @@ func parseDoc(slug, filePath, raw string) *Document {
 	}
 }
 
+// frontmatterValue returns the exact scalar value for a top-level key. The
+// parser intentionally supports only MDHub's small frontmatter contract; in
+// particular, substring matches such as `publish: untrue` must never make a
+// document public.
+func frontmatterValue(line, key string) (string, bool) {
+	name, value, ok := strings.Cut(line, ":")
+	if !ok || strings.TrimSpace(name) != key {
+		return "", false
+	}
+	return strings.TrimSpace(value), true
+}
+
 // excerptOf returns the first 200 runes of plain text.
 func excerptOf(plain string) string {
 	r := []rune(plain)
@@ -333,67 +350,6 @@ func fileSlug(fp string) string {
 	slug := filepath.ToSlash(rel)          // "translations/foo.md" or "_translations/foo.md"
 	slug = strings.TrimSuffix(slug, ".md") // "translations/foo"
 	return slug
-}
-
-// ---- Postgres ----
-
-func upsert(doc *Document) {
-	tx, err := db.Begin()
-	if err != nil {
-		log.Printf("tx begin: %v", err)
-		return
-	}
-	defer tx.Rollback()
-
-	_, err = tx.Exec(`
-		INSERT INTO documents (slug, file_path, title, content, raw_content, excerpt, word_count, published, source, category_path, category_manual, file_mtime)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,now())
-		ON CONFLICT (slug) DO UPDATE SET
-			title=EXCLUDED.title, content=EXCLUDED.content,
-			raw_content=EXCLUDED.raw_content, excerpt=EXCLUDED.excerpt,
-			word_count=EXCLUDED.word_count, published=EXCLUDED.published,
-			source=EXCLUDED.source,
-			category_manual=EXCLUDED.category_manual,
-			category_path = CASE WHEN EXCLUDED.category_path <> '' THEN EXCLUDED.category_path WHEN documents.category_manual AND NOT EXCLUDED.category_manual THEN '' ELSE documents.category_path END,
-			file_mtime=now()`,
-		doc.Slug, doc.FilePath, doc.Title, doc.Content, doc.RawContent,
-		doc.Excerpt, doc.WordCount, doc.Published, doc.Source, doc.CategoryPath, doc.CategoryManual)
-	if err != nil {
-		log.Printf("upsert doc %s: %v", doc.Slug, err)
-		return
-	}
-
-	// tags
-	tx.Exec("DELETE FROM document_tags WHERE slug=$1", doc.Slug)
-	for _, tag := range doc.Tags {
-		tx.Exec("INSERT INTO tags (name) VALUES ($1) ON CONFLICT DO NOTHING", tag)
-		tx.Exec("INSERT INTO document_tags (slug, tag) VALUES ($1,$2) ON CONFLICT DO NOTHING", doc.Slug, tag)
-	}
-
-	// backlinks
-	tx.Exec("DELETE FROM backlinks WHERE source_slug=$1", doc.Slug)
-	for _, target := range doc.Backlinks {
-		targetSlug := resolveSlug(target)
-		if targetSlug != "" {
-			tx.Exec("INSERT INTO backlinks (source_slug, target_slug) VALUES ($1,$2) ON CONFLICT DO NOTHING", doc.Slug, targetSlug)
-		}
-	}
-
-	tx.Commit()
-}
-
-func resolveSlug(ref string) string {
-	var slug string
-	err := db.QueryRow("SELECT slug FROM documents WHERE slug=$1", ref).Scan(&slug)
-	if err == nil {
-		return slug
-	}
-	// try fuzzy: match against title
-	err = db.QueryRow("SELECT slug FROM documents WHERE lower(title) LIKE $1 LIMIT 1", "%"+strings.ToLower(ref)+"%").Scan(&slug)
-	if err == nil {
-		return slug
-	}
-	return ""
 }
 
 // ---- HTTP handlers ----
@@ -516,8 +472,6 @@ func makeSnippet(content string, terms []string) string {
 
 func handleTags(w http.ResponseWriter, r *http.Request) {
 	tag := strings.TrimSpace(r.URL.Query().Get("tag"))
-	mu.RLock()
-	defer mu.RUnlock()
 
 	if tag != "" {
 		// list docs for tag
@@ -534,8 +488,15 @@ func handleTags(w http.ResponseWriter, r *http.Request) {
 		var docs []Document
 		for rows.Next() {
 			var d Document
-			rows.Scan(&d.Slug, &d.Title)
+			if err := rows.Scan(&d.Slug, &d.Title); err != nil {
+				httpError(w, err, http.StatusInternalServerError)
+				return
+			}
 			docs = append(docs, d)
+		}
+		if err := rows.Err(); err != nil {
+			httpError(w, err, http.StatusInternalServerError)
+			return
 		}
 		if docs == nil {
 			docs = []Document{}
@@ -565,8 +526,15 @@ func handleTags(w http.ResponseWriter, r *http.Request) {
 	var tags []TagCount
 	for rows.Next() {
 		var tc TagCount
-		rows.Scan(&tc.Name, &tc.Count)
+		if err := rows.Scan(&tc.Name, &tc.Count); err != nil {
+			httpError(w, err, http.StatusInternalServerError)
+			return
+		}
 		tags = append(tags, tc)
+	}
+	if err := rows.Err(); err != nil {
+		httpError(w, err, http.StatusInternalServerError)
+		return
 	}
 	if tags == nil {
 		tags = []TagCount{}
@@ -582,9 +550,6 @@ func handleBacklinks(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	mu.RLock()
-	defer mu.RUnlock()
-
 	rows, err := db.Query(`
 		SELECT d.slug, d.title FROM documents d
 		JOIN backlinks b ON d.slug = b.source_slug
@@ -598,8 +563,15 @@ func handleBacklinks(w http.ResponseWriter, r *http.Request) {
 	var docs []Document
 	for rows.Next() {
 		var d Document
-		rows.Scan(&d.Slug, &d.Title)
+		if err := rows.Scan(&d.Slug, &d.Title); err != nil {
+			httpError(w, err, http.StatusInternalServerError)
+			return
+		}
 		docs = append(docs, d)
+	}
+	if err := rows.Err(); err != nil {
+		httpError(w, err, http.StatusInternalServerError)
+		return
 	}
 	if docs == nil {
 		docs = []Document{}
@@ -644,7 +616,8 @@ func handleDocumentList(w http.ResponseWriter, r *http.Request) {
 		var mtime time.Time
 		var tags []string
 		if err := rows.Scan(&it.Slug, &it.Title, &it.Excerpt, &mtime, &it.CategoryPath, pq.Array(&tags)); err != nil {
-			continue
+			httpError(w, err, http.StatusInternalServerError)
+			return
 		}
 		if tags == nil {
 			tags = []string{}
@@ -652,6 +625,10 @@ func handleDocumentList(w http.ResponseWriter, r *http.Request) {
 		it.Tags = tags
 		it.Updated = mtime.UnixMilli()
 		items = append(items, it)
+	}
+	if err := rows.Err(); err != nil {
+		httpError(w, err, http.StatusInternalServerError)
+		return
 	}
 	writeJSON(w, items)
 }
@@ -675,8 +652,14 @@ func handleDocument(w http.ResponseWriter, r *http.Request) {
 	case http.MethodGet:
 		getDocument(w, r, slug)
 	case http.MethodPut:
+		if !requireEditAccess(w, r) {
+			return
+		}
 		putDocument(w, r, slug)
 	case http.MethodDelete:
+		if !requireEditAccess(w, r) {
+			return
+		}
 		deleteDocument(w, r, slug)
 	default:
 		httpError(w, fmt.Errorf("method not allowed"), 405)
@@ -699,9 +682,6 @@ type docDetail struct {
 }
 
 func getDocument(w http.ResponseWriter, r *http.Request, slug string) {
-	mu.RLock()
-	defer mu.RUnlock()
-
 	var d docDetail
 	var mtime time.Time
 	err := db.QueryRow(`
@@ -713,31 +693,53 @@ func getDocument(w http.ResponseWriter, r *http.Request, slug string) {
 		httpError(w, fmt.Errorf("not found"), 404)
 		return
 	}
+	if !d.Published && !hasEditAccess(r) {
+		httpError(w, fmt.Errorf("not found"), http.StatusNotFound)
+		return
+	}
 	d.Updated = mtime.UnixMilli()
 
 	// tags
-	rows, _ := db.Query("SELECT tag FROM document_tags WHERE slug=$1", slug)
-	if rows != nil {
-		defer rows.Close()
-		for rows.Next() {
-			var t string
-			rows.Scan(&t)
-			d.Tags = append(d.Tags, t)
+	rows, err := db.Query("SELECT tag FROM document_tags WHERE slug=$1", slug)
+	if err != nil {
+		httpError(w, err, http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var tag string
+		if err := rows.Scan(&tag); err != nil {
+			httpError(w, err, http.StatusInternalServerError)
+			return
 		}
+		d.Tags = append(d.Tags, tag)
+	}
+	if err := rows.Err(); err != nil {
+		httpError(w, err, http.StatusInternalServerError)
+		return
 	}
 	if d.Tags == nil {
 		d.Tags = []string{}
 	}
 
 	// backlinks
-	blRows, _ := db.Query("SELECT source_slug FROM backlinks WHERE target_slug=$1", slug)
-	if blRows != nil {
-		defer blRows.Close()
-		for blRows.Next() {
-			var s string
-			blRows.Scan(&s)
-			d.Backlinks = append(d.Backlinks, s)
+	blRows, err := db.Query("SELECT source_slug FROM backlinks WHERE target_slug=$1", slug)
+	if err != nil {
+		httpError(w, err, http.StatusInternalServerError)
+		return
+	}
+	defer blRows.Close()
+	for blRows.Next() {
+		var source string
+		if err := blRows.Scan(&source); err != nil {
+			httpError(w, err, http.StatusInternalServerError)
+			return
 		}
+		d.Backlinks = append(d.Backlinks, source)
+	}
+	if err := blRows.Err(); err != nil {
+		httpError(w, err, http.StatusInternalServerError)
+		return
 	}
 	if d.Backlinks == nil {
 		d.Backlinks = []string{}
@@ -762,44 +764,29 @@ func putDocument(w http.ResponseWriter, r *http.Request, slug string) {
 
 	// keep the import-provenance file_path if the doc already exists
 	var filePath string
-	db.QueryRow("SELECT file_path FROM documents WHERE slug=$1", slug).Scan(&filePath)
+	if err := db.QueryRow("SELECT file_path FROM documents WHERE slug=$1", slug).Scan(&filePath); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		httpError(w, fmt.Errorf("read document provenance: %w", err), http.StatusInternalServerError)
+		return
+	}
 
 	doc := parseDoc(slug, filePath, string(raw))
-	upsert(doc)
-	if doc.Published && !doc.CategoryManual && doc.CategoryPath == "" {
-		enqueueInsert(doc.Slug)
+	if err := publishDocument(doc); err != nil {
+		httpError(w, fmt.Errorf("write document %s: %w", slug, err), http.StatusInternalServerError)
+		return
 	}
-
-	now := time.Now().UnixMilli()
-	if doc.Published {
-		enqueueEmbed(doc.Slug)
-	} else {
-		db.Exec("DELETE FROM embeddings WHERE slug=$1", doc.Slug)
-	}
-	mu.Lock()
-	if doc.Published {
-		searchIndex[doc.Slug] = &searchEntry{
-			slug:    doc.Slug,
-			title:   doc.Title,
-			plain:   strings.ToLower(doc.Content),
-			display: doc.Content,
-			mtime:   now,
-		}
-	} else {
-		delete(searchIndex, doc.Slug)
-		delete(embedIndex, doc.Slug)
-	}
-	mu.Unlock()
-	markUniverseDirty()
 
 	writeJSON(w, map[string]string{"status": "ok"})
 }
 
 func deleteDocument(w http.ResponseWriter, r *http.Request, slug string) {
-	mu.Lock()
-	deleteDoc(slug)
-	mu.Unlock()
-	markUniverseDirty()
+	removed, err := removeDocument(slug)
+	if err != nil {
+		httpError(w, fmt.Errorf("delete document %s: %w", slug, err), http.StatusInternalServerError)
+		return
+	}
+	if removed {
+		log.Printf("removed: %s", slug)
+	}
 	writeJSON(w, map[string]string{"status": "ok"})
 }
 
@@ -870,10 +857,48 @@ func isContentAddressedUploadPath(key string, data []byte, mime string) bool {
 	return key == uploadedImagePath(data, mime)
 }
 
-func imageEditTokenValid(r *http.Request) bool {
+func editTokenValid(r *http.Request) bool {
 	providedHash := sha256.Sum256([]byte(r.Header.Get("X-MDHub-Edit-Token")))
 	expectedHash := sha256.Sum256([]byte(editToken))
 	return editToken != "" && subtle.ConstantTimeCompare(providedHash[:], expectedHash[:]) == 1
+}
+
+func isLoopbackListenAddress(address string) bool {
+	host, _, err := net.SplitHostPort(address)
+	if err != nil {
+		return false
+	}
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+func validateIngressConfig(address, token string) error {
+	if !isLoopbackListenAddress(address) && token == "" {
+		return fmt.Errorf("MDHUB_EDIT_TOKEN is required when MDHUB_LISTEN is not loopback")
+	}
+	return nil
+}
+
+func hasEditAccess(r *http.Request) bool {
+	if editToken == "" {
+		return isLoopbackListenAddress(listenAddr)
+	}
+	return editTokenValid(r)
+}
+
+func requireEditAccess(w http.ResponseWriter, r *http.Request) bool {
+	if hasEditAccess(r) {
+		return true
+	}
+	if editToken == "" {
+		httpError(w, fmt.Errorf("editing disabled; configure MDHUB_EDIT_TOKEN"), http.StatusServiceUnavailable)
+		return false
+	}
+	httpError(w, fmt.Errorf("invalid edit token"), http.StatusUnauthorized)
+	return false
 }
 
 func handleImage(w http.ResponseWriter, r *http.Request) {
@@ -901,6 +926,9 @@ func getImage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", mime)
+	w.Header().Set("Content-Security-Policy", "default-src 'none'; sandbox")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Cross-Origin-Resource-Policy", "same-origin")
 	if isContentAddressedUploadPath(key, data, mime) {
 		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
 	} else {
@@ -914,7 +942,7 @@ func uploadImage(w http.ResponseWriter, r *http.Request) {
 		httpError(w, fmt.Errorf("image uploads disabled; configure MDHUB_EDIT_TOKEN"), http.StatusServiceUnavailable)
 		return
 	}
-	if !imageEditTokenValid(r) {
+	if !editTokenValid(r) {
 		httpError(w, fmt.Errorf("invalid edit token"), http.StatusUnauthorized)
 		return
 	}
@@ -1152,8 +1180,9 @@ func getComments(w http.ResponseWriter, r *http.Request, slug string) {
 		SELECT t.id, t.quote, t.prefix, t.suffix, e.author, e.text, e.created_at
 		FROM comment_threads t
 		JOIN comment_entries e ON e.thread_id = t.id
-		WHERE t.slug=$1
-		ORDER BY t.created_at, e.id`, slug)
+		JOIN documents d ON d.slug = t.slug
+		WHERE t.slug=$1 AND (d.published OR $2)
+		ORDER BY t.created_at, e.id`, slug, hasEditAccess(r))
 	if err != nil {
 		httpError(w, err, 500)
 		return
@@ -1166,7 +1195,8 @@ func getComments(w http.ResponseWriter, r *http.Request, slug string) {
 		var id, quote, prefix, suffix, author, text string
 		var at time.Time
 		if err := rows.Scan(&id, &quote, &prefix, &suffix, &author, &text, &at); err != nil {
-			continue
+			httpError(w, err, http.StatusInternalServerError)
+			return
 		}
 		i, ok := byID[id]
 		if !ok {
@@ -1183,22 +1213,29 @@ func getComments(w http.ResponseWriter, r *http.Request, slug string) {
 			Text:   text,
 		})
 	}
+	if err := rows.Err(); err != nil {
+		httpError(w, err, http.StatusInternalServerError)
+		return
+	}
 	writeJSON(w, threads)
 }
 
 type newComment struct {
-	Author string `json:"author"`
-	Text   string `json:"text"`
-	Anchor *struct {
-		Quote  string `json:"quote"`
-		Prefix string `json:"prefix"`
-		Suffix string `json:"suffix"`
-	} `json:"anchor"`
-	Reply string `json:"reply"`
+	Author string         `json:"author"`
+	Text   string         `json:"text"`
+	Anchor *commentAnchor `json:"anchor"`
+	Reply  string         `json:"reply"`
 }
 
+type commentAnchor struct {
+	Quote  string `json:"quote"`
+	Prefix string `json:"prefix"`
+	Suffix string `json:"suffix"`
+}
+
+const maxCommentBodyBytes int64 = 16 << 10
+
 func postComment(w http.ResponseWriter, r *http.Request, slug string) {
-	// target document must exist and be published
 	var published bool
 	err := db.QueryRow("SELECT published FROM documents WHERE slug=$1", slug).Scan(&published)
 	if err != nil || !published {
@@ -1206,75 +1243,144 @@ func postComment(w http.ResponseWriter, r *http.Request, slug string) {
 		return
 	}
 
-	var c newComment
-	if err := json.NewDecoder(r.Body).Decode(&c); err != nil {
-		httpError(w, fmt.Errorf("invalid body"), 400)
+	c, status, err := decodeNewComment(w, r)
+	if err != nil {
+		httpError(w, err, status)
 		return
 	}
-	c.Text = strings.TrimSpace(c.Text)
-	if c.Text == "" || len([]rune(c.Text)) > 2000 {
-		httpError(w, fmt.Errorf("text required, max 2000 chars"), 400)
+	if err := normalizeNewComment(&c); err != nil {
+		httpError(w, err, http.StatusBadRequest)
 		return
 	}
-	c.Author = strings.TrimSpace(c.Author)
-	if c.Author == "" {
-		c.Author = "用户"
-	}
-	if a := []rune(c.Author); len(a) > 30 {
-		c.Author = string(a[:30])
-	}
-
 	if c.Reply != "" {
-		var exists bool
-		err := db.QueryRow("SELECT EXISTS(SELECT 1 FROM comment_threads WHERE id=$1 AND slug=$2)", c.Reply, slug).Scan(&exists)
-		if err != nil || !exists {
-			httpError(w, fmt.Errorf("thread not found"), 400)
-			return
-		}
-		if _, err := db.Exec("INSERT INTO comment_entries (thread_id, author, text) VALUES ($1,$2,$3)", c.Reply, c.Author, c.Text); err != nil {
-			httpError(w, err, 500)
-			return
-		}
-		writeJSON(w, map[string]interface{}{"ok": true, "id": c.Reply})
+		postCommentReply(w, slug, c)
 		return
 	}
+	postCommentThread(w, slug, c)
+}
 
-	if c.Anchor == nil || strings.TrimSpace(c.Anchor.Quote) == "" {
-		httpError(w, fmt.Errorf("anchor.quote required"), 400)
+func decodeNewComment(w http.ResponseWriter, r *http.Request) (newComment, int, error) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxCommentBodyBytes)
+	var comment newComment
+	decoder := json.NewDecoder(r.Body)
+	if err := decoder.Decode(&comment); err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			return newComment{}, http.StatusRequestEntityTooLarge, fmt.Errorf("comment body exceeds 16 KB")
+		}
+		return newComment{}, http.StatusBadRequest, fmt.Errorf("invalid body")
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		return newComment{}, http.StatusBadRequest, fmt.Errorf("invalid body")
+	}
+	return comment, http.StatusOK, nil
+}
+
+func normalizeNewComment(comment *newComment) error {
+	comment.Text = strings.TrimSpace(comment.Text)
+	if comment.Text == "" || len([]rune(comment.Text)) > 2000 {
+		return fmt.Errorf("text required, max 2000 chars")
+	}
+	comment.Author = strings.TrimSpace(comment.Author)
+	if comment.Author == "" {
+		comment.Author = "用户"
+	}
+	comment.Author = truncateRunes(comment.Author, 30)
+	if comment.Reply != "" {
+		if len([]rune(comment.Reply)) > 20 {
+			return fmt.Errorf("invalid reply id")
+		}
+		return nil
+	}
+	if comment.Anchor == nil || strings.TrimSpace(comment.Anchor.Quote) == "" {
+		return fmt.Errorf("anchor.quote required")
+	}
+	comment.Anchor.Quote = strings.TrimSpace(comment.Anchor.Quote)
+	if len([]rune(comment.Anchor.Quote)) > 500 {
+		return fmt.Errorf("anchor.quote max 500 chars")
+	}
+	comment.Anchor.Prefix = truncateRunes(comment.Anchor.Prefix, 80)
+	comment.Anchor.Suffix = truncateRunes(comment.Anchor.Suffix, 80)
+	return nil
+}
+
+func postCommentReply(w http.ResponseWriter, slug string, comment newComment) {
+	var exists bool
+	if err := db.QueryRow("SELECT EXISTS(SELECT 1 FROM comment_threads WHERE id=$1 AND slug=$2)", comment.Reply, slug).Scan(&exists); err != nil {
+		httpError(w, err, http.StatusInternalServerError)
 		return
 	}
-	id := randomID()
+	if !exists {
+		httpError(w, fmt.Errorf("thread not found"), http.StatusBadRequest)
+		return
+	}
+	if _, err := db.Exec("INSERT INTO comment_entries (thread_id, author, text) VALUES ($1,$2,$3)", comment.Reply, comment.Author, comment.Text); err != nil {
+		httpError(w, err, http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, map[string]interface{}{"ok": true, "id": comment.Reply})
+}
+
+func postCommentThread(w http.ResponseWriter, slug string, comment newComment) {
+	id, err := randomID()
+	if err != nil {
+		httpError(w, fmt.Errorf("generate comment id: %w", err), http.StatusInternalServerError)
+		return
+	}
 	tx, err := db.Begin()
 	if err != nil {
 		httpError(w, err, 500)
 		return
 	}
 	defer tx.Rollback()
-	if _, err := tx.Exec("INSERT INTO comment_threads (id, slug, quote, prefix, suffix) VALUES ($1,$2,$3,$4,$5) ON CONFLICT (id) DO NOTHING",
-		id, slug, c.Anchor.Quote, c.Anchor.Prefix, c.Anchor.Suffix); err != nil {
+	if _, err := tx.Exec("INSERT INTO comment_threads (id, slug, quote, prefix, suffix) VALUES ($1,$2,$3,$4,$5)",
+		id, slug, comment.Anchor.Quote, comment.Anchor.Prefix, comment.Anchor.Suffix); err != nil {
 		httpError(w, err, 500)
 		return
 	}
-	if _, err := tx.Exec("INSERT INTO comment_entries (thread_id, author, text) VALUES ($1,$2,$3)", id, c.Author, c.Text); err != nil {
+	if _, err := tx.Exec("INSERT INTO comment_entries (thread_id, author, text) VALUES ($1,$2,$3)", id, comment.Author, comment.Text); err != nil {
 		httpError(w, err, 500)
 		return
 	}
-	tx.Commit()
+	if err := tx.Commit(); err != nil {
+		httpError(w, err, http.StatusInternalServerError)
+		return
+	}
 	writeJSON(w, map[string]interface{}{"ok": true, "id": id})
 }
 
 const idChars = "0123456789abcdefghijklmnopqrstuvwxyz"
 
-// randomID mirrors the TS `Math.random().toString(36).slice(2, 8)`.
-func randomID() string {
-	b := make([]byte, 6)
-	for i := range b {
-		b[i] = idChars[rand.IntN(len(idChars))]
+func truncateRunes(value string, limit int) string {
+	runes := []rune(value)
+	if len(runes) > limit {
+		return string(runes[:limit])
 	}
-	return string(b)
+	return value
+}
+
+// randomID uses operating-system entropy so thread IDs cannot be predicted or
+// deliberately collided by another commenter.
+func randomID() (string, error) {
+	random := make([]byte, 12)
+	if _, err := rand.Read(random); err != nil {
+		return "", err
+	}
+	id := make([]byte, len(random))
+	for i, value := range random {
+		id[i] = idChars[int(value)%len(idChars)]
+	}
+	return string(id), nil
 }
 
 func handleReindex(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		httpError(w, fmt.Errorf("method not allowed"), http.StatusMethodNotAllowed)
+		return
+	}
+	if !requireEditAccess(w, r) {
+		return
+	}
 	loadIndexFromDB()
 	loadEmbeddingsFromDB()
 	writeJSON(w, map[string]string{"status": "ok"})
@@ -1287,12 +1393,16 @@ func handleReclassify(w http.ResponseWriter, r *http.Request) {
 		httpError(w, fmt.Errorf("method not allowed"), 405)
 		return
 	}
+	if !requireEditAccess(w, r) {
+		return
+	}
 	rows, err := db.Query(
 		"UPDATE documents SET category_path='' WHERE published AND NOT category_manual RETURNING slug")
 	if err != nil {
 		httpError(w, err, 500)
 		return
 	}
+	defer rows.Close()
 	queued := 0
 	for rows.Next() {
 		var slug string
@@ -1301,21 +1411,37 @@ func handleReclassify(w http.ResponseWriter, r *http.Request) {
 			queued++
 		}
 	}
-	rows.Close()
+	if err := rows.Err(); err != nil {
+		httpError(w, err, http.StatusInternalServerError)
+		return
+	}
 	writeJSON(w, map[string]int{"queued": queued})
 }
 
 // ---- helpers ----
 
 func writeJSON(w http.ResponseWriter, v interface{}) {
+	writeJSONStatus(w, http.StatusOK, v)
+}
+
+func writeJSONStatus(w http.ResponseWriter, status int, v interface{}) {
 	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
-	json.NewEncoder(w).Encode(v)
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(status)
+	if err := json.NewEncoder(w).Encode(v); err != nil {
+		log.Printf("encode JSON response: %v", err)
+	}
 }
 
 func httpError(w http.ResponseWriter, err error, code int) {
-	w.WriteHeader(code)
-	writeJSON(w, map[string]string{"error": err.Error()})
+	message := err.Error()
+	if code >= http.StatusInternalServerError {
+		log.Printf("internal HTTP error: %v", err)
+		message = "internal server error"
+	}
+	writeJSONStatus(w, code, map[string]string{"error": message})
 }
 
 func getEnv(k, def string) string {

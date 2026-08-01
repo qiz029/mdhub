@@ -1,4 +1,4 @@
-import { timingSafeEqual } from "node:crypto";
+import { createHash, timingSafeEqual } from "node:crypto";
 import type { NextRequest } from "next/server";
 
 export function requireEditToken(req: NextRequest): Response | null {
@@ -10,13 +10,15 @@ export function requireEditToken(req: NextRequest): Response | null {
     );
   }
   const provided = req.headers.get("x-mdhub-edit-token") || "";
-  const expectedBytes = Buffer.from(expected);
-  const providedBytes = Buffer.from(provided);
-  if (
-    expectedBytes.length !== providedBytes.length ||
-    !timingSafeEqual(expectedBytes, providedBytes)
-  ) {
+  if (!editTokenMatches(provided, expected)) {
     return Response.json({ error: "invalid edit token" }, { status: 401 });
   }
   return null;
+}
+
+export function editTokenMatches(provided: string, expected: string): boolean {
+  if (!expected) return false;
+  const providedHash = createHash("sha256").update(provided).digest();
+  const expectedHash = createHash("sha256").update(expected).digest();
+  return timingSafeEqual(providedHash, expectedHash);
 }

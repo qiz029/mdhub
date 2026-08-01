@@ -52,7 +52,7 @@ MDHUB_LLM_API_KEY="sk-..."
 MDHUB_LLM_MODEL="gpt-4o-mini"
 ```
 
-Backfill existing notes: `curl -X POST http://localhost:10002/api/reclassify`
+Backfill existing notes: `curl -X POST -H "X-MDHub-Edit-Token: $MDHUB_EDIT_TOKEN" http://localhost:10002/api/reclassify`
 
 ### 2.5 Optional: local semantic search (CPU)
 
@@ -61,7 +61,8 @@ brew install ollama
 brew services start ollama
 ollama pull qwen3-embedding:0.6b                 # 639 MB
 # go-backend/.env: MDHUB_EMBED_URL="http://localhost:11434", restart backend
-curl -X POST http://localhost:10002/api/reembed  # backfill existing notes
+curl -X POST -H "X-MDHub-Edit-Token: $MDHUB_EDIT_TOKEN" \
+  http://localhost:10002/api/reembed  # backfill existing notes
 ```
 
 ### 2.6 Post-deploy verification
@@ -81,7 +82,8 @@ psql -d mdhub -c '\dt'   # documents, tags, document_tags, backlinks,
 ### 3.1 Create or update
 
 ```bash
-curl -X PUT --data-binary @note.md http://localhost:10002/api/documents/<slug>
+curl -X PUT -H "X-MDHub-Edit-Token: $MDHUB_EDIT_TOKEN" \
+  --data-binary @note.md http://localhost:10002/api/documents/<slug>
 ```
 
 - Body is the **complete raw markdown**, frontmatter included. `Content-Type` is irrelevant; the raw body is used as-is.
@@ -110,7 +112,8 @@ Response: `{"status":"ok"}` (200). Verify visibility:
 ### 3.2 Delete
 
 ```bash
-curl -X DELETE http://localhost:10002/api/documents/<slug>   # → {"status":"ok"}
+curl -X DELETE -H "X-MDHub-Edit-Token: $MDHUB_EDIT_TOKEN" \
+  http://localhost:10002/api/documents/<slug>   # → {"status":"ok"}
 ```
 
 Tags, backlinks, comments, and embeddings cascade automatically.
@@ -191,7 +194,7 @@ brew services restart ollama
 ```bash
 git pull
 psql -d mdhub -f go-backend/schema.sql    # always re-run; it is idempotent (IF NOT EXISTS / ALTER IF NOT EXISTS)
-cd go-backend && go build -tags nodynamic -o mdhub-go . && go test -count=1 ./...
+cd go-backend && go build -tags nodynamic -o mdhub-go . && ./check-coverage.sh
 cd .. && npm run build
 # restart both services (4.1), then run the 2.6 verification block
 ```
@@ -212,9 +215,9 @@ All of these are idempotent and safe to run any time:
 
 | Task | Command |
 |---|---|
-| Rebuild in-memory search index | `curl -X POST localhost:10002/api/reindex` |
-| Rebuild LLM category tree (keeps pinned) | `curl -X POST localhost:10002/api/reclassify` |
-| Recompute embeddings | `curl -X POST localhost:10002/api/reembed` |
+| Rebuild in-memory search index | `curl -X POST -H "X-MDHub-Edit-Token: $MDHUB_EDIT_TOKEN" localhost:10002/api/reindex` |
+| Rebuild LLM category tree (keeps pinned) | `curl -X POST -H "X-MDHub-Edit-Token: $MDHUB_EDIT_TOKEN" localhost:10002/api/reclassify` |
+| Recompute embeddings | `curl -X POST -H "X-MDHub-Edit-Token: $MDHUB_EDIT_TOKEN" localhost:10002/api/reembed` |
 | Re-sync from a vault | `./mdhub-go -import "<vault root>"` |
 
 Run `POST /api/reembed` once after upgrading to the Knowledge Universe build so
@@ -245,7 +248,7 @@ Go backend (`go-backend/.env`):
 | Variable | Default | Empty means |
 |---|---|---|
 | `MDHUB_PG` | `postgres://mdhub:mdhub@localhost:5432/mdhub?sslmode=disable` | — (required) |
-| `MDHUB_LISTEN` | `:10002` | — |
+| `MDHUB_LISTEN` | `127.0.0.1:10002` | —; expose deliberately only behind an authenticated proxy |
 | `MDHUB_LLM_BASE_URL` | `https://api.openai.com/v1` | — |
 | `MDHUB_LLM_API_KEY` | _(empty)_ | categorization disabled |
 | `MDHUB_LLM_MODEL` | `gpt-4o-mini` | — |

@@ -2,7 +2,7 @@
 # Run the MDHub Go backend.
 # Set environment variables or source a .env file first.
 #   MDHUB_PG     – PostgreSQL DSN
-#   MDHUB_LISTEN – listen address (default :10002)
+#   MDHUB_LISTEN – listen address (default 127.0.0.1:10002)
 # One-shot vault import (then exits); pass the vault ROOT:
 #   ./mdhub-go -import "/path/to/Obsidian Vault"
 

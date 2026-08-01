@@ -1,6 +1,10 @@
 package main
 
 import (
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"slices"
@@ -62,6 +66,144 @@ func TestMakeSnippetEscapesAndMarks(t *testing.T) {
 	}
 	if !strings.Contains(snip, "<mark>红烧</mark>") {
 		t.Errorf("snippet should mark the term, got: %s", snip)
+	}
+}
+
+func TestParseDocRequiresExactPublishBoolean(t *testing.T) {
+	tests := []struct {
+		name      string
+		value     string
+		published bool
+	}{
+		{name: "true", value: "true", published: true},
+		{name: "quoted true", value: `"true"`, published: true},
+		{name: "uppercase true", value: "TRUE", published: true},
+		{name: "false", value: "false", published: false},
+		{name: "substring", value: "untrue", published: false},
+		{name: "suffix", value: "true-ish", published: false},
+		{name: "empty", value: "", published: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			doc := parseDoc("note", "", "---\npublish: "+tt.value+"\n---\n# Note")
+			if doc.Published != tt.published {
+				t.Fatalf("Published = %v, want %v", doc.Published, tt.published)
+			}
+		})
+	}
+}
+
+func TestHTTPErrorHidesInternalDetailsAndSetsHeaders(t *testing.T) {
+	response := httptest.NewRecorder()
+	httpError(response, fmt.Errorf("pq: secret database detail"), http.StatusInternalServerError)
+
+	if response.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500", response.Code)
+	}
+	if got := response.Header().Get("Content-Type"); got != "application/json" {
+		t.Fatalf("Content-Type = %q, want application/json", got)
+	}
+	if got := response.Header().Get("Access-Control-Allow-Origin"); got != "*" {
+		t.Fatalf("CORS header = %q, want *", got)
+	}
+	var body map[string]string
+	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body["error"] != "internal server error" {
+		t.Fatalf("error = %q, want generic message", body["error"])
+	}
+	if strings.Contains(response.Body.String(), "secret") {
+		t.Fatal("internal error detail leaked in response")
+	}
+}
+
+func TestRandomIDUsesLongURLSafeIdentifiers(t *testing.T) {
+	seen := make(map[string]struct{})
+	for i := 0; i < 100; i++ {
+		id, err := randomID()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(id) != 12 || strings.Trim(id, idChars) != "" {
+			t.Fatalf("invalid id %q", id)
+		}
+		if _, duplicate := seen[id]; duplicate {
+			t.Fatalf("duplicate id %q", id)
+		}
+		seen[id] = struct{}{}
+	}
+}
+
+func TestNormalizeNewComment(t *testing.T) {
+	tests := []struct {
+		name    string
+		comment newComment
+		wantErr bool
+	}{
+		{name: "thread", comment: newComment{Text: " hello ", Anchor: &commentAnchor{Quote: " quote "}}},
+		{name: "reply", comment: newComment{Author: "Agent", Text: "reply", Reply: "thread-id"}},
+		{name: "missing text", comment: newComment{Anchor: &commentAnchor{Quote: "quote"}}, wantErr: true},
+		{name: "missing anchor", comment: newComment{Text: "hello"}, wantErr: true},
+		{name: "long reply", comment: newComment{Text: "hello", Reply: strings.Repeat("x", 21)}, wantErr: true},
+		{name: "long quote", comment: newComment{Text: "hello", Anchor: &commentAnchor{Quote: strings.Repeat("x", 501)}}, wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := normalizeNewComment(&tt.comment)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if err == nil && tt.comment.Author == "" {
+				t.Fatal("author default was not applied")
+			}
+		})
+	}
+}
+
+func TestValidateIngressConfig(t *testing.T) {
+	tests := []struct {
+		name    string
+		address string
+		token   string
+		wantErr bool
+	}{
+		{name: "IPv4 loopback", address: "127.0.0.1:10002"},
+		{name: "IPv6 loopback", address: "[::1]:10002"},
+		{name: "localhost", address: "localhost:10002"},
+		{name: "public with token", address: ":10002", token: "secret"},
+		{name: "public without token", address: ":10002", wantErr: true},
+		{name: "specific public IP", address: "192.0.2.1:10002", wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateIngressConfig(tt.address, tt.token)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestEditAccessRequiresConfiguredToken(t *testing.T) {
+	previousToken, previousAddress := editToken, listenAddr
+	t.Cleanup(func() { editToken, listenAddr = previousToken, previousAddress })
+	request := httptest.NewRequest(http.MethodPut, "/api/documents/note", nil)
+
+	listenAddr, editToken = "127.0.0.1:10002", ""
+	if !hasEditAccess(request) {
+		t.Fatal("loopback compatibility access was rejected")
+	}
+	editToken = "secret"
+	if hasEditAccess(request) {
+		t.Fatal("missing configured token was accepted")
+	}
+	request.Header.Set("X-MDHub-Edit-Token", "secret")
+	if !hasEditAccess(request) {
+		t.Fatal("matching configured token was rejected")
 	}
 }
 

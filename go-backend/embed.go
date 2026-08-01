@@ -24,7 +24,6 @@ import (
 	"net/http"
 	"sort"
 	"strings"
-	"sync"
 	"time"
 )
 
@@ -32,10 +31,7 @@ var (
 	embedBaseURL = getEnv("MDHUB_EMBED_URL", "") // empty = semantic search disabled
 	embedModel   = getEnv("MDHUB_EMBED_MODEL", "qwen3-embedding:0.6b")
 
-	embedQueue = make(chan string, 500)
-	embedSeen  = map[string]bool{} // slugs currently queued (dedup)
-	embedSeenM sync.Mutex
-	embedWG    sync.WaitGroup // lets one-shot commands (e.g. -import) drain the queue before exit
+	embedJobs = newKeyedJobQueue[string]("embed", 500)
 
 	embedIndex = map[string][]float32{} // slug -> vector; guarded by mu (main.go)
 )
@@ -225,23 +221,7 @@ func enqueueEmbed(slug string) {
 	if embedBaseURL == "" {
 		return
 	}
-	embedSeenM.Lock()
-	if embedSeen[slug] {
-		embedSeenM.Unlock()
-		return
-	}
-	embedSeen[slug] = true
-	embedSeenM.Unlock()
-
-	select {
-	case embedQueue <- slug:
-		embedWG.Add(1)
-	default:
-		embedSeenM.Lock()
-		delete(embedSeen, slug)
-		embedSeenM.Unlock()
-		log.Printf("embed queue full, dropped %s", slug)
-	}
+	embedJobs.enqueue(slug, slug)
 }
 
 // startEmbedder launches the background worker; no-op when disabled.
@@ -250,30 +230,14 @@ func startEmbedder() {
 		log.Println("embedding semantic search disabled (MDHUB_EMBED_URL empty)")
 		return
 	}
-	go embedWorker()
-}
-
-// embedWorker consumes queued slugs sequentially. Failures are logged and
-// skipped — no retries. The 120s client timeout covers the first call,
-// which loads the model into memory on CPU.
-func embedWorker() {
 	client := &http.Client{Timeout: 120 * time.Second}
-	for slug := range embedQueue {
-		embedSeenM.Lock()
-		delete(embedSeen, slug)
-		embedSeenM.Unlock()
-
-		if err := doEmbed(slug, client); err != nil {
-			log.Printf("embed %s: %v", slug, err)
-		}
-		embedWG.Done()
-	}
+	embedJobs.start(func(slug string) error { return doEmbed(slug, client) })
 }
 
 // waitEmbed blocks until every queued embedding has finished. Used by
 // one-shot commands (-import) so results land before the process exits.
 func waitEmbed() {
-	embedWG.Wait()
+	embedJobs.wait()
 }
 
 // doEmbed embeds one published document and stores the vector in Postgres
@@ -285,7 +249,9 @@ func doEmbed(slug string, client *http.Client) error {
 		"SELECT title, content FROM documents WHERE slug=$1 AND published=true", slug).
 		Scan(&title, &content)
 	if err == sql.ErrNoRows {
-		db.Exec("DELETE FROM embeddings WHERE slug=$1", slug)
+		if _, deleteErr := db.Exec("DELETE FROM embeddings WHERE slug=$1", slug); deleteErr != nil {
+			return fmt.Errorf("delete stale embedding: %w", deleteErr)
+		}
 		mu.Lock()
 		delete(embedIndex, slug)
 		mu.Unlock()
@@ -339,11 +305,16 @@ func loadEmbeddingsFromDB() {
 		var slug string
 		var blob []byte
 		if err := rows.Scan(&slug, &blob); err != nil {
-			continue
+			log.Printf("scan embedding index: %v", err)
+			return
 		}
 		if v := decodeVec(blob); v != nil {
 			newIndex[slug] = v
 		}
+	}
+	if err := rows.Err(); err != nil {
+		log.Printf("read embedding index: %v", err)
+		return
 	}
 	mu.Lock()
 	embedIndex = newIndex
@@ -428,11 +399,15 @@ func handleReembed(w http.ResponseWriter, r *http.Request) {
 		httpError(w, fmt.Errorf("method not allowed"), 405)
 		return
 	}
+	if !requireEditAccess(w, r) {
+		return
+	}
 	rows, err := db.Query("SELECT slug FROM documents WHERE published=true")
 	if err != nil {
 		httpError(w, err, 500)
 		return
 	}
+	defer rows.Close()
 	queued := 0
 	for rows.Next() {
 		var slug string
@@ -441,6 +416,9 @@ func handleReembed(w http.ResponseWriter, r *http.Request) {
 			queued++
 		}
 	}
-	rows.Close()
+	if err := rows.Err(); err != nil {
+		httpError(w, err, http.StatusInternalServerError)
+		return
+	}
 	writeJSON(w, map[string]int{"queued": queued})
 }

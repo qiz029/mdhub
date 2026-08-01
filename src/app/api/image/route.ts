@@ -22,6 +22,9 @@ export async function GET(req: NextRequest) {
     const headers = new Headers();
     const contentType = upstream.headers.get("Content-Type");
     if (contentType) headers.set("Content-Type", contentType);
+    headers.set("Content-Security-Policy", "default-src 'none'; sandbox");
+    headers.set("X-Content-Type-Options", "nosniff");
+    headers.set("Cross-Origin-Resource-Policy", "same-origin");
     headers.set(
       "Cache-Control",
       upstream.headers.get("Cache-Control") || "private, max-age=300",

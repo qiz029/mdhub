@@ -314,9 +314,6 @@ html {
 ::selection {
   background: var(--draft-highlight);
 }
-::highlight(mdhub-draft) {
-  background-color: var(--draft-highlight);
-}
 .mdhub-has-comment {
   background: var(--comment-bg);
   border-radius: 0.375rem;

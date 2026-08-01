@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/gen2brain/webp"
 )
 
@@ -187,23 +188,23 @@ func TestReservedUploadPath(t *testing.T) {
 	}
 }
 
-func TestImageEditTokenValid(t *testing.T) {
+func TestEditTokenValid(t *testing.T) {
 	original := editToken
 	t.Cleanup(func() { editToken = original })
 
 	request := httptest.NewRequest(http.MethodPost, "/api/images", nil)
 	editToken = ""
-	if imageEditTokenValid(request) {
+	if editTokenValid(request) {
 		t.Fatal("empty configured token was accepted")
 	}
 
 	editToken = "correct horse battery staple"
 	request.Header.Set("X-MDHub-Edit-Token", "wrong")
-	if imageEditTokenValid(request) {
+	if editTokenValid(request) {
 		t.Fatal("wrong token was accepted")
 	}
 	request.Header.Set("X-MDHub-Edit-Token", editToken)
-	if !imageEditTokenValid(request) {
+	if !editTokenValid(request) {
 		t.Fatal("matching token was rejected")
 	}
 }
@@ -222,5 +223,29 @@ func TestPutDocumentRejectsOversizedBody(t *testing.T) {
 	putDocument(response, request, "test")
 	if response.Code != http.StatusRequestEntityTooLarge {
 		t.Fatalf("status = %d, want 413", response.Code)
+	}
+}
+
+func TestGetImageSetsSandboxedContentHeaders(t *testing.T) {
+	mock := withMockDatabase(t)
+	mock.ExpectQuery("SELECT data, mime FROM images").
+		WithArgs("vault/diagram.svg").
+		WillReturnRows(sqlmock.NewRows([]string{"data", "mime"}).AddRow([]byte("<svg/>"), "image/svg+xml"))
+
+	request := httptest.NewRequest(http.MethodGet, "/api/images?path=vault/diagram.svg", nil)
+	response := httptest.NewRecorder()
+	getImage(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", response.Code)
+	}
+	if got := response.Header().Get("Content-Security-Policy"); got != "default-src 'none'; sandbox" {
+		t.Fatalf("CSP = %q", got)
+	}
+	if got := response.Header().Get("X-Content-Type-Options"); got != "nosniff" {
+		t.Fatalf("X-Content-Type-Options = %q", got)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
 	}
 }

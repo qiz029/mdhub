@@ -27,7 +27,10 @@ export async function PUT(
   try {
     const upstream = await fetch(`${API_URL}/api/documents/${slug}`, {
       method: "PUT",
-      headers: { "Content-Type": "text/markdown; charset=utf-8" },
+      headers: {
+        "Content-Type": "text/markdown; charset=utf-8",
+        "X-MDHub-Edit-Token": process.env.MDHUB_EDIT_TOKEN || "",
+      },
       body: req.body,
       cache: "no-store",
       duplex: "half",
