@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-labelledby="title">
+  <title id="title">Markdown Hub</title>
+  <rect width="64" height="64" rx="14" fill="#faf9f6"/>
+  <path d="M24 8h19l11 11v31H43V29L32 18h-8z" fill="#66877a"/>
+  <path d="M14 17h19l12 5 5 7v27l-9-4V33l-14-5v22l-13 6z" fill="#211f1c"/>
+  <path d="M8 42h24" fill="none" stroke="#c15f3c" stroke-width="3" stroke-linecap="round"/>
+  <circle cx="8" cy="42" r="5" fill="#c15f3c"/>
+</svg>

@@ -5,6 +5,10 @@ import { FontProvider } from "@/components/FontProvider";
 export const metadata: Metadata = {
   title: "Markdown Hub",
   description: "Markdown sharing and viewing",
+  icons: {
+    icon: "/mdhub/mdhub-logo.svg",
+    shortcut: "/mdhub/mdhub-logo.svg",
+  },
 };
 
 // Apply stored reader prefs (theme / font / size / width) before first paint

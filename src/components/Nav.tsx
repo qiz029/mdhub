@@ -34,9 +34,17 @@ export function Nav({ active = "documents" }: NavProps) {
           )}
           <Link
             href="/"
-            className="text-[15px] font-semibold tracking-tight text-stone-900 hover:text-stone-700"
+            className="inline-flex items-center gap-2 text-[15px] font-semibold tracking-tight text-stone-900 transition-colors hover:text-stone-700"
           >
-            Markdown Hub
+            <img
+              src="/mdhub/mdhub-logo.svg"
+              alt=""
+              aria-hidden="true"
+              width={28}
+              height={28}
+              className="size-7 shrink-0"
+            />
+            <span>Markdown Hub</span>
           </Link>
         </div>
         <nav aria-label="主视图" className="flex shrink-0 items-center gap-4">
