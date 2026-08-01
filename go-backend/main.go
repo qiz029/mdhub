@@ -190,6 +190,8 @@ func main() {
 	mux.HandleFunc("/api/collisions", handleCollisions)
 	mux.HandleFunc("/api/collisions/", handleCollision)
 	mux.HandleFunc("/api/recollide", handleRecollide)
+	mux.HandleFunc("/api/blindbox", handleBlindbox)
+	mux.HandleFunc("/api/growth", handleGrowth)
 	mux.HandleFunc("/api/images", handleImage)
 	mux.HandleFunc("/api/reindex", handleReindex)
 	mux.HandleFunc("/api/reclassify", handleReclassify)

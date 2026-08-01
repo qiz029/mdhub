@@ -1,4 +1,6 @@
 import { Nav } from "@/components/Nav";
+import { BlindBox } from "@/components/BlindBox";
+import { GrowthChart } from "@/components/GrowthChart";
 import { SparksClient } from "@/components/SparksClient";
 
 export const dynamic = "force-dynamic";
@@ -19,7 +21,11 @@ export default function SparksPage() {
             碎片 → 碰撞 → 灵感 → 长成。捕获和策展需要编辑令牌。
           </p>
         </div>
-        <SparksClient />
+        <div className="space-y-10">
+          <BlindBox />
+          <SparksClient />
+          <GrowthChart />
+        </div>
       </main>
     </div>
   );

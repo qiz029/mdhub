@@ -12,6 +12,12 @@ import {
   type CollisionVerdict,
   type Spark,
 } from "@/lib/sparks";
+import {
+  answerMarkdown,
+  answerSlug,
+  bountyAgeLabel,
+  isOpenBounty,
+} from "@/lib/play";
 
 const TOKEN_KEY = "mdhub-edit-token";
 
@@ -123,6 +129,10 @@ export function SparksClient() {
   const [draft, setDraft] = useState("");
   const [saving, setSaving] = useState(false);
   const [showDismissed, setShowDismissed] = useState(false);
+  const [claimingId, setClaimingId] = useState<number | null>(null);
+  const [claimDraft, setClaimDraft] = useState("");
+  const [claiming, setClaiming] = useState(false);
+  const [showAnswered, setShowAnswered] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -218,7 +228,59 @@ export function SparksClient() {
     }
   }
 
+  // Claiming a bounty is writing the answer: PUT the answer note first
+  // (needs the edit token), then close the bounty by posting its slug.
+  async function submitClaim(collision: Collision) {
+    if (claiming) return;
+    setClaiming(true);
+    setError("");
+    try {
+      const now = new Date();
+      const slug = answerSlug(collision.id, now, Math.random);
+      const endpoint =
+        "/mdhub/api/document/" +
+        slug
+          .split("/")
+          .map((part) => encodeURIComponent(part))
+          .join("/");
+      const putRes = await fetchWithEditToken(endpoint, {
+        method: "PUT",
+        headers: { "Content-Type": "text/markdown; charset=utf-8" },
+        body: answerMarkdown(collision, claimDraft),
+      });
+      if (!putRes.ok) {
+        const result = (await putRes.json().catch(() => ({}))) as {
+          error?: string;
+        };
+        throw new Error(result.error || `保存回答失败（HTTP ${putRes.status}）`);
+      }
+      const answerRes = await fetchWithEditToken(
+        `/mdhub/api/collisions/${collision.id}/answer`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ slug }),
+        },
+      );
+      if (!answerRes.ok) {
+        throw new Error(`认领失败（HTTP ${answerRes.status}）`);
+      }
+      setClaimingId(null);
+      setClaimDraft("");
+      const collisionsRes = await fetch("/mdhub/api/collisions");
+      if (collisionsRes.ok) {
+        setCollisions((await collisionsRes.json()) as Collision[]);
+      }
+    } catch (claimError) {
+      setError(claimError instanceof Error ? claimError.message : "认领失败");
+    } finally {
+      setClaiming(false);
+    }
+  }
+
   const nowMs = Date.now();
+  const openBounties = collisions.filter(isOpenBounty);
+  const answeredBounties = collisions.filter((c) => c.answered_by !== "");
   const activeCollisions = collisions.filter((c) => c.verdict !== "dismissed");
   const dismissedCollisions = collisions.filter(
     (c) => c.verdict === "dismissed",
@@ -259,6 +321,128 @@ export function SparksClient() {
             保存为 _sparks/ 下的碎片（type: fleeting），需编辑令牌
           </span>
         </div>
+      </section>
+
+      <section aria-labelledby="bounty-title">
+        <h2 id="bounty-title" className="text-sm font-semibold text-stone-800">
+          悬赏
+        </h2>
+        {loading ? (
+          <p className="mt-3 text-sm text-stone-400">加载中…</p>
+        ) : openBounties.length === 0 ? (
+          <p className="mt-3 text-sm text-stone-400">
+            没有开放悬赏。碰撞产出的开放问题会挂在这里等你认领。
+          </p>
+        ) : (
+          <ul className="mt-3 space-y-3">
+            {openBounties.map((bounty) => (
+              <li
+                key={bounty.id}
+                className="rounded-xl border border-stone-200 bg-white p-4"
+              >
+                <p className="text-sm font-medium leading-6 text-stone-800">
+                  {bounty.question}
+                </p>
+                <div className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-sm">
+                  <Link
+                    href={viewHref(bounty.slug_a)}
+                    className="text-stone-600 hover:underline"
+                  >
+                    {bounty.title_a}
+                  </Link>
+                  <span className="text-stone-400">↔</span>
+                  <Link
+                    href={viewHref(bounty.slug_b)}
+                    className="text-stone-600 hover:underline"
+                  >
+                    {bounty.title_b}
+                  </Link>
+                  <span className="ml-auto rounded-full bg-amber-100 px-2 py-0.5 text-xs text-amber-700">
+                    {bountyAgeLabel(bounty.created_at, nowMs)}
+                  </span>
+                </div>
+                {claimingId === bounty.id ? (
+                  <div className="mt-3">
+                    <textarea
+                      value={claimDraft}
+                      onChange={(event) => setClaimDraft(event.target.value)}
+                      rows={4}
+                      placeholder="写下你的回答（会保存为一篇正式笔记）…"
+                      className="w-full rounded-xl border border-stone-300 bg-white px-3 py-2.5 text-sm leading-6 text-stone-800 placeholder:text-stone-400 focus:border-stone-500 focus:outline-none"
+                    />
+                    <div className="mt-2 flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => submitClaim(bounty)}
+                        disabled={claiming}
+                        className="rounded-md bg-stone-900 px-3 py-1.5 text-xs font-medium text-white hover:opacity-85 disabled:opacity-40"
+                      >
+                        {claiming ? "提交中…" : "提交回答"}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setClaimingId(null);
+                          setClaimDraft("");
+                        }}
+                        disabled={claiming}
+                        className="rounded-md border border-stone-300 bg-white px-3 py-1.5 text-xs font-medium text-stone-700 hover:bg-stone-50 disabled:opacity-40"
+                      >
+                        取消
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setClaimingId(bounty.id);
+                      setClaimDraft("");
+                    }}
+                    className="mt-3 rounded-md border border-stone-300 bg-white px-3 py-1.5 text-xs font-medium text-stone-700 hover:bg-stone-50"
+                  >
+                    认领
+                  </button>
+                )}
+              </li>
+            ))}
+          </ul>
+        )}
+        {answeredBounties.length > 0 && (
+          <div className="mt-3">
+            <button
+              type="button"
+              onClick={() => setShowAnswered((value) => !value)}
+              className="text-xs text-stone-400 hover:text-stone-600"
+            >
+              {showAnswered
+                ? "收起已回答"
+                : `已回答（${answeredBounties.length}）`}
+            </button>
+            {showAnswered && (
+              <ul className="mt-3 space-y-2 opacity-80">
+                {answeredBounties.map((bounty) => (
+                  <li
+                    key={bounty.id}
+                    className="rounded-xl border border-stone-200 bg-white p-4"
+                  >
+                    <p className="line-clamp-2 text-sm leading-6 text-stone-600">
+                      {bounty.question}
+                    </p>
+                    <div className="mt-1.5 text-sm">
+                      <Link
+                        href={viewHref(bounty.answered_by)}
+                        className="font-medium text-stone-800 hover:underline"
+                      >
+                        回答：{bounty.answered_by.split("/").pop()}
+                      </Link>
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        )}
       </section>
 
       <section aria-labelledby="collision-stream-title">

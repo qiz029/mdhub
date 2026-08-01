@@ -260,9 +260,11 @@ func TestHandleCollisionsPublicRead(t *testing.T) {
 	columns := []string{
 		"id", "slug_a", "slug_b", "title_a", "title_b",
 		"score", "explanation", "question", "verdict", "created_at",
+		"answered_by", "answered_at",
 	}
 	row := []driver.Value{
 		int64(7), "a", "b", "A", "B", 0.9, "conn", "q", "new", time.Unix(100, 0),
+		"notes/answer", time.Unix(200, 0),
 	}
 
 	t.Run("anonymous sees every collision", func(t *testing.T) {
@@ -275,7 +277,10 @@ func TestHandleCollisionsPublicRead(t *testing.T) {
 		// no edit token: the full collision list is public
 		response := httptest.NewRecorder()
 		handleCollisions(response, httptest.NewRequest(http.MethodGet, "/api/collisions", nil))
-		if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"id":7`) {
+		if response.Code != http.StatusOK ||
+			!strings.Contains(response.Body.String(), `"id":7`) ||
+			!strings.Contains(response.Body.String(), `"answered_by":"notes/answer"`) ||
+			!strings.Contains(response.Body.String(), `"answered_at":200000`) {
 			t.Fatalf("response = %d %q", response.Code, response.Body.String())
 		}
 		if err := mock.ExpectationsWereMet(); err != nil {
@@ -387,4 +392,198 @@ func TestHandleRecollideQueuesEveryEmbeddedSlug(t *testing.T) {
 	if response.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("method status = %d", response.Code)
 	}
+}
+
+func answerRequest(t *testing.T, path, body string, withToken bool) (*httptest.ResponseRecorder, *http.Request) {
+	t.Helper()
+	request := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
+	if withToken {
+		request.Header.Set("X-MDHub-Edit-Token", "secret")
+	}
+	return httptest.NewRecorder(), request
+}
+
+func TestHandleCollisionAnswer(t *testing.T) {
+	t.Run("claims the bounty", func(t *testing.T) {
+		mock := withMockDatabase(t)
+		isolateEditAccess(t)
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT EXISTS(SELECT 1 FROM documents WHERE slug=$1)")).
+			WithArgs("notes/answer").
+			WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(true))
+		mock.ExpectExec(regexp.QuoteMeta("UPDATE collisions SET answered_by=$1, answered_at=now() WHERE id=$2")).
+			WithArgs("notes/answer", "7").
+			WillReturnResult(sqlmock.NewResult(0, 1))
+		response, request := answerRequest(t, "/api/collisions/7/answer", `{"slug":"notes/answer"}`, true)
+
+		handleCollision(response, request)
+
+		if response.Code != http.StatusOK {
+			t.Fatalf("status = %d, body = %q", response.Code, response.Body.String())
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	t.Run("re-answering overwrites the previous claim", func(t *testing.T) {
+		mock := withMockDatabase(t)
+		isolateEditAccess(t)
+		for _, slug := range []string{"notes/first", "notes/second"} {
+			mock.ExpectQuery("SELECT EXISTS").
+				WithArgs(slug).
+				WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(true))
+			mock.ExpectExec("UPDATE collisions SET answered_by").
+				WithArgs(slug, "7").
+				WillReturnResult(sqlmock.NewResult(0, 1))
+		}
+		for _, slug := range []string{"notes/first", "notes/second"} {
+			response, request := answerRequest(t, "/api/collisions/7/answer", `{"slug":"`+slug+`"}`, true)
+			handleCollision(response, request)
+			if response.Code != http.StatusOK {
+				t.Fatalf("slug %s: status = %d, body = %q", slug, response.Code, response.Body.String())
+			}
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	t.Run("unknown slug is 400", func(t *testing.T) {
+		mock := withMockDatabase(t)
+		isolateEditAccess(t)
+		mock.ExpectQuery("SELECT EXISTS").
+			WithArgs("notes/ghost").
+			WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(false))
+		response, request := answerRequest(t, "/api/collisions/7/answer", `{"slug":"notes/ghost"}`, true)
+
+		handleCollision(response, request)
+
+		if response.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400", response.Code)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	t.Run("empty slug is 400", func(t *testing.T) {
+		withMockDatabase(t)
+		isolateEditAccess(t)
+		response, request := answerRequest(t, "/api/collisions/7/answer", `{"slug":"  "}`, true)
+		handleCollision(response, request)
+		if response.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400", response.Code)
+		}
+	})
+
+	t.Run("invalid body is 400", func(t *testing.T) {
+		withMockDatabase(t)
+		isolateEditAccess(t)
+		response, request := answerRequest(t, "/api/collisions/7/answer", `not json`, true)
+		handleCollision(response, request)
+		if response.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400", response.Code)
+		}
+	})
+
+	t.Run("unknown collision id is 404", func(t *testing.T) {
+		mock := withMockDatabase(t)
+		isolateEditAccess(t)
+		mock.ExpectQuery("SELECT EXISTS").
+			WithArgs("notes/answer").
+			WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(true))
+		mock.ExpectExec("UPDATE collisions SET answered_by").
+			WithArgs("notes/answer", "99").
+			WillReturnResult(sqlmock.NewResult(0, 0))
+		response, request := answerRequest(t, "/api/collisions/99/answer", `{"slug":"notes/answer"}`, true)
+
+		handleCollision(response, request)
+
+		if response.Code != http.StatusNotFound {
+			t.Fatalf("status = %d, want 404", response.Code)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	t.Run("edit token required", func(t *testing.T) {
+		withMockDatabase(t)
+		isolateEditAccess(t)
+		response, request := answerRequest(t, "/api/collisions/7/answer", `{"slug":"notes/answer"}`, false)
+		handleCollision(response, request)
+		if response.Code != http.StatusUnauthorized {
+			t.Fatalf("status = %d, want 401", response.Code)
+		}
+	})
+
+	t.Run("GET is not allowed", func(t *testing.T) {
+		withMockDatabase(t)
+		isolateEditAccess(t)
+		request := httptest.NewRequest(http.MethodGet, "/api/collisions/7/answer", nil)
+		response := httptest.NewRecorder()
+		handleCollision(response, request)
+		if response.Code != http.StatusMethodNotAllowed {
+			t.Fatalf("status = %d, want 405", response.Code)
+		}
+	})
+}
+
+func TestHandleBlindbox(t *testing.T) {
+	columns := []string{
+		"id", "slug_a", "slug_b", "title_a", "title_b", "excerpt_a", "excerpt_b",
+		"score", "explanation", "question", "verdict", "created_at",
+		"answered_by", "answered_at",
+	}
+
+	t.Run("maps the drawn collision", func(t *testing.T) {
+		mock := withMockDatabase(t)
+		mock.ExpectQuery("md5").
+			WillReturnRows(sqlmock.NewRows(columns).AddRow(
+				int64(3), "a", "b", "Title A", "Title B", "excerpt a", "excerpt b",
+				0.9, "conn", "q", "new", time.Unix(100, 0),
+				"", nil,
+			))
+
+		response := httptest.NewRecorder()
+		handleBlindbox(response, httptest.NewRequest(http.MethodGet, "/api/blindbox", nil))
+
+		body := response.Body.String()
+		for _, want := range []string{
+			`"id":3`, `"slug_a":"a"`, `"title_b":"Title B"`,
+			`"excerpt_a":"excerpt a"`, `"excerpt_b":"excerpt b"`,
+			`"explanation":"conn"`, `"answered_by":""`, `"answered_at":0`,
+		} {
+			if !strings.Contains(body, want) {
+				t.Fatalf("response missing %s: %d %q", want, response.Code, body)
+			}
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	t.Run("null when nothing to draw", func(t *testing.T) {
+		mock := withMockDatabase(t)
+		mock.ExpectQuery("md5").
+			WillReturnRows(sqlmock.NewRows(columns))
+
+		response := httptest.NewRecorder()
+		handleBlindbox(response, httptest.NewRequest(http.MethodGet, "/api/blindbox", nil))
+
+		if response.Code != http.StatusOK || strings.TrimSpace(response.Body.String()) != "null" {
+			t.Fatalf("response = %d %q, want null", response.Code, response.Body.String())
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	t.Run("POST is not allowed", func(t *testing.T) {
+		response := httptest.NewRecorder()
+		handleBlindbox(response, httptest.NewRequest(http.MethodPost, "/api/blindbox", nil))
+		if response.Code != http.StatusMethodNotAllowed {
+			t.Fatalf("status = %d, want 405", response.Code)
+		}
+	})
 }

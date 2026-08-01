@@ -17,6 +17,7 @@ package main
 // vectors.
 
 import (
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -273,7 +274,9 @@ type collisionItem struct {
 	Explanation string  `json:"explanation"`
 	Question    string  `json:"question"`
 	Verdict     string  `json:"verdict"`
-	CreatedAt   int64   `json:"created_at"` // Unix ms
+	CreatedAt   int64   `json:"created_at"`  // Unix ms
+	AnsweredBy  string  `json:"answered_by"` // slug of the answer note, "" = bounty open
+	AnsweredAt  int64   `json:"answered_at"` // Unix ms, 0 = unanswered
 }
 
 // handleCollisions serves GET /api/collisions — newest 50 pairs, optionally
@@ -286,7 +289,8 @@ func handleCollisions(w http.ResponseWriter, r *http.Request) {
 	slug := strings.TrimSpace(r.URL.Query().Get("slug"))
 	rows, err := db.Query(`
 		SELECT c.id, c.slug_a, c.slug_b, a.title, b.title,
-			c.score, c.explanation, c.question, c.verdict, c.created_at
+			c.score, c.explanation, c.question, c.verdict, c.created_at,
+			c.answered_by, c.answered_at
 		FROM collisions c
 		JOIN documents a ON a.slug=c.slug_a
 		JOIN documents b ON b.slug=c.slug_b
@@ -303,12 +307,17 @@ func handleCollisions(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var it collisionItem
 		var at time.Time
+		var answeredAt sql.NullTime
 		if err := rows.Scan(&it.ID, &it.SlugA, &it.SlugB, &it.TitleA, &it.TitleB,
-			&it.Score, &it.Explanation, &it.Question, &it.Verdict, &at); err != nil {
+			&it.Score, &it.Explanation, &it.Question, &it.Verdict, &at,
+			&it.AnsweredBy, &answeredAt); err != nil {
 			httpError(w, err, http.StatusInternalServerError)
 			return
 		}
 		it.CreatedAt = at.UnixMilli()
+		if answeredAt.Valid {
+			it.AnsweredAt = answeredAt.Time.UnixMilli()
+		}
 		items = append(items, it)
 	}
 	if err := rows.Err(); err != nil {
@@ -318,11 +327,16 @@ func handleCollisions(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, items)
 }
 
-// handleCollision dispatches /api/collisions/{id} requests.
+// handleCollision dispatches /api/collisions/{id} requests; a path ending in
+// "/answer" goes to the bounty-claim handler, everything else is a verdict.
 func handleCollision(w http.ResponseWriter, r *http.Request) {
 	id := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/api/collisions/"), "/")
 	if id == "" {
 		handleCollisions(w, r)
+		return
+	}
+	if strings.HasSuffix(id, "/answer") {
+		handleCollisionAnswer(w, r, strings.TrimSuffix(id, "/answer"))
 		return
 	}
 	if r.Method != http.MethodPost {
@@ -358,6 +372,102 @@ func handleCollision(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, map[string]string{"status": "ok"})
+}
+
+// handleCollisionAnswer claims a collision's bounty question: the caller has
+// written a note answering it, and the collision records that note's slug.
+// Re-answering overwrites the previous claim. POST only, edit token required.
+func handleCollisionAnswer(w http.ResponseWriter, r *http.Request, id string) {
+	if r.Method != http.MethodPost {
+		httpError(w, fmt.Errorf("method not allowed"), http.StatusMethodNotAllowed)
+		return
+	}
+	if !requireEditAccess(w, r) {
+		return
+	}
+
+	var body struct {
+		Slug string `json:"slug"`
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, maxCommentBodyBytes)
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		httpError(w, fmt.Errorf("invalid body"), http.StatusBadRequest)
+		return
+	}
+	body.Slug = strings.TrimSpace(body.Slug)
+	if body.Slug == "" {
+		httpError(w, fmt.Errorf("slug required"), http.StatusBadRequest)
+		return
+	}
+	var exists bool
+	if err := db.QueryRow("SELECT EXISTS(SELECT 1 FROM documents WHERE slug=$1)", body.Slug).Scan(&exists); err != nil {
+		httpError(w, err, http.StatusInternalServerError)
+		return
+	}
+	if !exists {
+		httpError(w, fmt.Errorf("unknown slug"), http.StatusBadRequest)
+		return
+	}
+
+	result, err := db.Exec("UPDATE collisions SET answered_by=$1, answered_at=now() WHERE id=$2", body.Slug, id)
+	if err != nil {
+		httpError(w, err, http.StatusInternalServerError)
+		return
+	}
+	if updated, _ := result.RowsAffected(); updated == 0 {
+		httpError(w, fmt.Errorf("not found"), http.StatusNotFound)
+		return
+	}
+	writeJSON(w, map[string]string{"status": "ok"})
+}
+
+// ---- daily blind box ----
+
+type blindBoxItem struct {
+	collisionItem
+	ExcerptA string `json:"excerpt_a"`
+	ExcerptB string `json:"excerpt_b"`
+}
+
+// handleBlindbox serves GET /api/blindbox — one collision per day, drawn
+// deterministically: md5(id || current date) needs no state table, pairs
+// with an explanation are preferred. Responds with null when there is
+// nothing to draw.
+func handleBlindbox(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		httpError(w, fmt.Errorf("method not allowed"), http.StatusMethodNotAllowed)
+		return
+	}
+	var it blindBoxItem
+	var at time.Time
+	var answeredAt sql.NullTime
+	err := db.QueryRow(`
+		SELECT c.id, c.slug_a, c.slug_b, a.title, b.title, a.excerpt, b.excerpt,
+			c.score, c.explanation, c.question, c.verdict, c.created_at,
+			c.answered_by, c.answered_at
+		FROM collisions c
+		JOIN documents a ON a.slug=c.slug_a
+		JOIN documents b ON b.slug=c.slug_b
+		WHERE c.verdict != 'dismissed'
+		ORDER BY (c.explanation <> '') DESC, md5(c.id::text || CURRENT_DATE::text)
+		LIMIT 1`).
+		Scan(&it.ID, &it.SlugA, &it.SlugB, &it.TitleA, &it.TitleB,
+			&it.ExcerptA, &it.ExcerptB,
+			&it.Score, &it.Explanation, &it.Question, &it.Verdict, &at,
+			&it.AnsweredBy, &answeredAt)
+	if err == sql.ErrNoRows {
+		writeJSON(w, nil)
+		return
+	}
+	if err != nil {
+		httpError(w, err, http.StatusInternalServerError)
+		return
+	}
+	it.CreatedAt = at.UnixMilli()
+	if answeredAt.Valid {
+		it.AnsweredAt = answeredAt.Time.UnixMilli()
+	}
+	writeJSON(w, it)
 }
 
 // handleRecollide queues every embedded slug for collision detection

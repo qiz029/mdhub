@@ -88,3 +88,8 @@ CREATE TABLE IF NOT EXISTS collisions (
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     UNIQUE (slug_a, slug_b)
 );
+
+-- bounty answers: a collision's open question is claimed by writing a note
+-- that answers it. No FK — the answer may be any document.
+ALTER TABLE collisions ADD COLUMN IF NOT EXISTS answered_by TEXT NOT NULL DEFAULT '';
+ALTER TABLE collisions ADD COLUMN IF NOT EXISTS answered_at TIMESTAMPTZ;

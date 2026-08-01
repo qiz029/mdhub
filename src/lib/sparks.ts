@@ -24,6 +24,8 @@ export type Collision = {
   question: string;
   verdict: CollisionVerdict;
   created_at: number; // Unix ms
+  answered_by: string; // slug of the answer note; "" = bounty still open
+  answered_at: number; // Unix ms; 0 = unanswered
 };
 
 const DAY_MS = 24 * 60 * 60 * 1000;
