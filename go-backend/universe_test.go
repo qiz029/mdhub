@@ -99,6 +99,26 @@ func TestSemanticClusterAssignmentsSeparatesWeaklyConnectedCommunities(t *testin
 	}
 }
 
+func TestBuildSemanticUniverseExposesDocumentWordCount(t *testing.T) {
+	docs := []universeDocument{{Slug: "long-note", Title: "Long note", WordCount: 2345}}
+
+	graph := buildSemanticUniverse(docs, nil, 2)
+
+	if len(graph.Nodes) != 1 || graph.Nodes[0].WordCount != 2345 {
+		t.Fatalf("nodes = %+v; want document word count exposed", graph.Nodes)
+	}
+}
+
+func TestUniverseCacheKeyChangesWhenWordCountChanges(t *testing.T) {
+	docs := []universeDocument{{Slug: "note", Title: "Note", WordCount: 100}}
+	first := universeCacheKey(docs, 1)
+	docs[0].WordCount = 200
+
+	if second := universeCacheKey(docs, 1); second == first {
+		t.Fatal("cache key did not change with document word count")
+	}
+}
+
 func TestCachedSemanticUniverseInvalidatesWhenVectorsChange(t *testing.T) {
 	universeCache.Lock()
 	universeCache.ready = false

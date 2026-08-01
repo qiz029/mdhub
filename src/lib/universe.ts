@@ -10,6 +10,7 @@ export type UniverseNode = {
   embedded: boolean;
   degree: number;
   cluster: number;
+  word_count: number;
 };
 
 export type UniverseEdge = {
