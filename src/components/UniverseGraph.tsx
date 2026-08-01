@@ -56,7 +56,7 @@ function nodeColor(node: UniverseNode): string {
 }
 
 function nodeRadius(node: UniverseNode): number {
-  return 5 + Math.min(8, Math.sqrt(node.degree) * 2.2);
+  return 5 + Math.min(8, Math.sqrt(Math.max(0, node.word_count) / 120));
 }
 
 function endpointNode(endpoint: string | number | LayoutNode): LayoutNode | null {
@@ -673,9 +673,10 @@ export function UniverseGraphView({ graph }: { graph: UniverseGraph }) {
               <h2 className="mt-2 text-lg font-semibold leading-snug text-stone-900">
                 {selected.title}
               </h2>
-              {selected.category && (
-                <p className="mt-1.5 text-xs text-stone-400">{selected.category}</p>
-              )}
+              <p className="mt-1.5 text-xs text-stone-400">
+                {selected.category && `${selected.category} · `}
+                {selected.word_count.toLocaleString()} 字符
+              </p>
               {selected.excerpt && (
                 <p className="mt-3 line-clamp-4 text-sm leading-6 text-stone-500">
                   {selected.excerpt}

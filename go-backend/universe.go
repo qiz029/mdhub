@@ -25,24 +25,26 @@ var universeCache = struct {
 }{}
 
 type universeDocument struct {
-	Slug     string
-	Title    string
-	Excerpt  string
-	Category string
-	Tags     []string
-	Updated  int64
+	Slug      string
+	Title     string
+	Excerpt   string
+	Category  string
+	Tags      []string
+	Updated   int64
+	WordCount int
 }
 
 type universeNode struct {
-	ID       string   `json:"id"`
-	Title    string   `json:"title"`
-	Excerpt  string   `json:"excerpt,omitempty"`
-	Category string   `json:"category,omitempty"`
-	Tags     []string `json:"tags"`
-	Updated  int64    `json:"updated"`
-	Embedded bool     `json:"embedded"`
-	Degree   int      `json:"degree"`
-	Cluster  int      `json:"cluster"`
+	ID        string   `json:"id"`
+	Title     string   `json:"title"`
+	Excerpt   string   `json:"excerpt,omitempty"`
+	Category  string   `json:"category,omitempty"`
+	Tags      []string `json:"tags"`
+	Updated   int64    `json:"updated"`
+	Embedded  bool     `json:"embedded"`
+	Degree    int      `json:"degree"`
+	Cluster   int      `json:"cluster"`
+	WordCount int      `json:"word_count"`
 }
 
 type universeEdge struct {
@@ -210,7 +212,7 @@ func buildSemanticUniverse(docs []universeDocument, vectors map[string][]float32
 		graph.Nodes = append(graph.Nodes, universeNode{
 			ID: doc.Slug, Title: doc.Title, Excerpt: doc.Excerpt,
 			Category: doc.Category, Tags: tags, Updated: doc.Updated,
-			Embedded: embedded,
+			Embedded: embedded, WordCount: doc.WordCount,
 		})
 	}
 
@@ -344,6 +346,7 @@ func universeCacheKey(docs []universeDocument, vectorGeneration uint64) uint64 {
 		write(doc.Title)
 		write(doc.Category)
 		write(strconv.FormatInt(doc.Updated, 10))
+		write(strconv.Itoa(doc.WordCount))
 		for _, tag := range doc.Tags {
 			write(tag)
 		}
@@ -367,12 +370,12 @@ func cachedSemanticUniverse(docs []universeDocument, vectors map[string][]float3
 
 func loadUniverseDocuments() ([]universeDocument, error) {
 	rows, err := db.Query(`
-		SELECT d.slug, d.title, d.excerpt, d.category_path, d.file_mtime,
+		SELECT d.slug, d.title, d.excerpt, d.category_path, d.file_mtime, d.word_count,
 			COALESCE(array_agg(dt.tag ORDER BY dt.tag) FILTER (WHERE dt.tag IS NOT NULL), '{}')
 		FROM documents d
 		LEFT JOIN document_tags dt ON dt.slug = d.slug
 		WHERE d.published=true
-		GROUP BY d.slug, d.title, d.excerpt, d.category_path, d.file_mtime
+		GROUP BY d.slug, d.title, d.excerpt, d.category_path, d.file_mtime, d.word_count
 		ORDER BY d.slug`)
 	if err != nil {
 		return nil, err
@@ -385,7 +388,7 @@ func loadUniverseDocuments() ([]universeDocument, error) {
 		var updated time.Time
 		if err := rows.Scan(
 			&doc.Slug, &doc.Title, &doc.Excerpt, &doc.Category,
-			&updated, pq.Array(&doc.Tags),
+			&updated, &doc.WordCount, pq.Array(&doc.Tags),
 		); err != nil {
 			return nil, err
 		}
