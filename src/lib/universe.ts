@@ -9,6 +9,7 @@ export type UniverseNode = {
   updated: number;
   embedded: boolean;
   degree: number;
+  cluster: number;
 };
 
 export type UniverseEdge = {

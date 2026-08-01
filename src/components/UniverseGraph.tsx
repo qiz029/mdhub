@@ -7,7 +7,8 @@ import {
   forceLink,
   forceManyBody,
   forceSimulation,
-  type Simulation,
+  forceX,
+  forceY,
   type SimulationLinkDatum,
   type SimulationNodeDatum,
 } from "d3-force";
@@ -26,9 +27,8 @@ import type { UniverseEdge, UniverseGraph, UniverseNode } from "@/lib/universe";
 type LayoutNode = UniverseNode & SimulationNodeDatum;
 type LayoutEdge = UniverseEdge & SimulationLinkDatum<LayoutNode>;
 type ViewTransform = { x: number; y: number; k: number };
-type Gesture =
-  | { kind: "pan"; x: number; y: number; originX: number; originY: number }
-  | { kind: "node"; node: LayoutNode };
+type Gesture = { x: number; y: number; originX: number; originY: number };
+type ClusterCenter = { x: number; y: number };
 
 const clusterColors = [
   "#c15f3c",
@@ -51,8 +51,8 @@ function hashString(value: string): number {
 }
 
 function nodeColor(node: UniverseNode): string {
-  const key = node.category || node.tags[0] || "uncategorized";
-  return clusterColors[hashString(key) % clusterColors.length];
+  if (node.cluster < 0) return "#aaa49a";
+  return clusterColors[node.cluster % clusterColors.length];
 }
 
 function nodeRadius(node: UniverseNode): number {
@@ -75,6 +75,57 @@ function viewHref(slug: string): string {
 
 function browserViewHref(slug: string): string {
   return `/mdhub${viewHref(slug)}`;
+}
+
+function layoutCenters(
+  nodes: UniverseNode[],
+  width: number,
+  height: number,
+): Map<string, ClusterCenter> {
+  const counts = new Map<number, number>();
+  for (const node of nodes) {
+    if (node.cluster < 0) continue;
+    counts.set(node.cluster, (counts.get(node.cluster) ?? 0) + 1);
+  }
+  const clusters = [...counts].sort(
+    (left, right) => right[1] - left[1] || left[0] - right[0],
+  );
+  const clusterPositions = new Map<number, ClusterCenter>();
+  if (clusters.length === 1) {
+    clusterPositions.set(clusters[0][0], { x: width / 2, y: height / 2 });
+  } else if (clusters.length > 1) {
+    const radiusX = Math.min(width * 0.34, 110 + clusters.length * 24);
+    const radiusY = Math.min(height * 0.32, 100 + clusters.length * 20);
+    clusters.forEach(([cluster], index) => {
+      const angle = -Math.PI / 2 + (index * Math.PI * 2) / clusters.length;
+      clusterPositions.set(cluster, {
+        x: width / 2 + Math.cos(angle) * radiusX,
+        y: height / 2 + Math.sin(angle) * radiusY,
+      });
+    });
+  }
+
+  const centers = new Map<string, ClusterCenter>();
+  for (const node of nodes) {
+    const position = clusterPositions.get(node.cluster);
+    if (position) centers.set(node.id, position);
+  }
+
+  const unclustered = nodes
+    .filter((node) => node.cluster < 0)
+    .sort((left, right) => left.id.localeCompare(right.id));
+  if (unclustered.length === 1 && clusters.length === 0) {
+    centers.set(unclustered[0].id, { x: width / 2, y: height / 2 });
+    return centers;
+  }
+  unclustered.forEach((node, index) => {
+    const angle = -Math.PI / 2 + ((index + 0.5) * Math.PI * 2) / unclustered.length;
+    centers.set(node.id, {
+      x: width / 2 + Math.cos(angle) * width * 0.43,
+      y: height / 2 + Math.sin(angle) * height * 0.4,
+    });
+  });
+  return centers;
 }
 
 function semanticEdgesAtLimit(
@@ -136,7 +187,6 @@ export function UniverseGraphView({ graph }: { graph: UniverseGraph }) {
   const hostRef = useRef<HTMLDivElement>(null);
   const nodesRef = useRef<LayoutNode[]>([]);
   const edgesRef = useRef<LayoutEdge[]>([]);
-  const simulationRef = useRef<Simulation<LayoutNode, LayoutEdge> | null>(null);
   const transformRef = useRef<ViewTransform>({ x: 0, y: 0, k: 1 });
   const gestureRef = useRef<Gesture | null>(null);
   const selectedRef = useRef<string | null>(null);
@@ -286,35 +336,65 @@ export function UniverseGraphView({ graph }: { graph: UniverseGraph }) {
     const height = Math.max(480, host.clientHeight);
     const centerX = width / 2;
     const centerY = height / 2;
+    let centers = layoutCenters(graph.nodes, width, height);
     const nodes: LayoutNode[] = graph.nodes.map((node, index) => {
       const seed = hashString(node.id);
       const angle = ((seed % 360) * Math.PI) / 180;
-      const ring = 50 + (index % 9) * 18;
+      const ring = 22 + (index % 7) * 11;
+      const center = centers.get(node.id) ?? { x: centerX, y: centerY };
       return {
         ...node,
-        x: centerX + Math.cos(angle) * ring,
-        y: centerY + Math.sin(angle) * ring,
+        x: center.x + Math.cos(angle) * ring,
+        y: center.y + Math.sin(angle) * ring,
       };
     });
     const edges: LayoutEdge[] = visibleEdges.map((edge) => ({ ...edge }));
     nodesRef.current = nodes;
     edgesRef.current = edges;
 
+    const centerFor = (node: LayoutNode) =>
+      centers.get(node.id) ?? { x: centerX, y: centerY };
+    const xForce = forceX<LayoutNode>((node) => centerFor(node).x).strength(
+      (node) => (node.cluster < 0 ? 0.08 : 0.16),
+    );
+    const yForce = forceY<LayoutNode>((node) => centerFor(node).y).strength(
+      (node) => (node.cluster < 0 ? 0.08 : 0.16),
+    );
+
     const simulation = forceSimulation<LayoutNode>(nodes)
       .force(
         "link",
         forceLink<LayoutNode, LayoutEdge>(edges)
           .id((node) => node.id)
-          .distance((edge) => 65 + (1 - edge.similarity) * 260)
-          .strength((edge) => 0.18 + Math.max(0, edge.similarity) * 0.55),
+          .distance((edge) => {
+            const source = endpointNode(edge.source);
+            const target = endpointNode(edge.target);
+            const sameCluster = Boolean(
+              source && target && source.cluster === target.cluster,
+            );
+            return sameCluster
+              ? 48 + (1 - edge.similarity) * 130
+              : 170 + (1 - edge.similarity) * 220;
+          })
+          .strength((edge) => {
+            const source = endpointNode(edge.source);
+            const target = endpointNode(edge.target);
+            const similarity = Math.max(0, edge.similarity);
+            const sameCluster = Boolean(
+              source && target && source.cluster === target.cluster,
+            );
+            return sameCluster
+              ? 0.24 + similarity * 0.62
+              : 0.03 + similarity * 0.1;
+          }),
       )
-      .force("charge", forceManyBody<LayoutNode>().strength(-160).distanceMax(520))
-      .force("center", forceCenter(centerX, centerY).strength(0.06))
+      .force("charge", forceManyBody<LayoutNode>().strength(-125).distanceMax(420))
+      .force("center", forceCenter(centerX, centerY).strength(0.025))
+      .force("cluster-x", xForce)
+      .force("cluster-y", yForce)
       .force("collision", forceCollide<LayoutNode>().radius((node) => nodeRadius(node) + 10))
       .alphaDecay(0.028)
       .on("tick", render);
-    simulationRef.current = simulation;
-
     function resize() {
       const dpr = window.devicePixelRatio || 1;
       const nextWidth = Math.max(320, host!.clientWidth);
@@ -323,7 +403,10 @@ export function UniverseGraphView({ graph }: { graph: UniverseGraph }) {
       canvas!.height = Math.round(nextHeight * dpr);
       canvas!.style.width = `${nextWidth}px`;
       canvas!.style.height = `${nextHeight}px`;
-      simulation.force("center", forceCenter(nextWidth / 2, nextHeight / 2).strength(0.06));
+      centers = layoutCenters(graph.nodes, nextWidth, nextHeight);
+      xForce.x((node) => centerFor(node).x);
+      yForce.y((node) => centerFor(node).y);
+      simulation.force("center", forceCenter(nextWidth / 2, nextHeight / 2).strength(0.025));
       simulation.alpha(0.28).restart();
       render();
     }
@@ -340,7 +423,6 @@ export function UniverseGraphView({ graph }: { graph: UniverseGraph }) {
       observer.disconnect();
       themeObserver.disconnect();
       simulation.stop();
-      if (simulationRef.current === simulation) simulationRef.current = null;
     };
   }, [graph.nodes, render, visibleEdges]);
 
@@ -373,37 +455,25 @@ export function UniverseGraphView({ graph }: { graph: UniverseGraph }) {
   }
 
   function onPointerDown(event: ReactPointerEvent<HTMLCanvasElement>) {
-    event.currentTarget.setPointerCapture(event.pointerId);
     const node = hitNode(event);
     if (node) {
-      const point = worldPoint(event);
-      node.fx = point.x;
-      node.fy = point.y;
-      gestureRef.current = { kind: "node", node };
       setSelectedId(node.id);
-      simulationRef.current?.alphaTarget(0.16).restart();
       return;
     }
+    event.currentTarget.setPointerCapture(event.pointerId);
     const point = canvasPoint(event);
     gestureRef.current = {
-      kind: "pan",
       x: point.x,
       y: point.y,
       originX: transformRef.current.x,
       originY: transformRef.current.y,
     };
+    event.currentTarget.style.cursor = "grabbing";
   }
 
   function onPointerMove(event: ReactPointerEvent<HTMLCanvasElement>) {
     const gesture = gestureRef.current;
-    if (gesture?.kind === "node") {
-      const point = worldPoint(event);
-      gesture.node.fx = point.x;
-      gesture.node.fy = point.y;
-      render();
-      return;
-    }
-    if (gesture?.kind === "pan") {
+    if (gesture) {
       const point = canvasPoint(event);
       transformRef.current.x = gesture.originX + point.x - gesture.x;
       transformRef.current.y = gesture.originY + point.y - gesture.y;
@@ -421,15 +491,11 @@ export function UniverseGraphView({ graph }: { graph: UniverseGraph }) {
   }
 
   function endPointer(event: ReactPointerEvent<HTMLCanvasElement>) {
-    if (gestureRef.current?.kind === "node") {
-      gestureRef.current.node.fx = null;
-      gestureRef.current.node.fy = null;
-      simulationRef.current?.alphaTarget(0);
-    }
     gestureRef.current = null;
     if (event.currentTarget.hasPointerCapture(event.pointerId)) {
       event.currentTarget.releasePointerCapture(event.pointerId);
     }
+    event.currentTarget.style.cursor = hitNode(event) ? "pointer" : "grab";
   }
 
   function onWheel(event: ReactWheelEvent<HTMLCanvasElement>) {
@@ -472,6 +538,9 @@ export function UniverseGraphView({ graph }: { graph: UniverseGraph }) {
   const coverage = graph.meta.documents
     ? Math.round((graph.meta.embedded_documents / graph.meta.documents) * 100)
     : 0;
+  const clusterCount = new Set(
+    graph.nodes.filter((node) => node.cluster >= 0).map((node) => node.cluster),
+  ).size;
 
   if (graph.nodes.length === 0) {
     return (
@@ -490,8 +559,8 @@ export function UniverseGraphView({ graph }: { graph: UniverseGraph }) {
       >
         <canvas
           ref={canvasRef}
-          aria-label={`Knowledge Universe：${graph.meta.documents} 篇文档，${graph.meta.edges} 条语义关系`}
-          className="block touch-none"
+          aria-label={`Knowledge Universe：${graph.meta.documents} 篇文档，${clusterCount} 个语义 cluster，${graph.meta.edges} 条语义关系`}
+          className="block cursor-grab touch-none"
           onPointerDown={onPointerDown}
           onPointerMove={onPointerMove}
           onPointerUp={endPointer}
@@ -513,6 +582,9 @@ export function UniverseGraphView({ graph }: { graph: UniverseGraph }) {
         <div className="pointer-events-none absolute left-3 top-3 flex flex-wrap gap-2 text-xs sm:left-4 sm:top-4">
           <span className="rounded-full border border-stone-200 bg-white/90 px-2.5 py-1.5 text-stone-600 backdrop-blur">
             {graph.meta.documents} nodes
+          </span>
+          <span className="rounded-full border border-stone-200 bg-white/90 px-2.5 py-1.5 text-stone-600 backdrop-blur">
+            {clusterCount} clusters
           </span>
           <span className="rounded-full border border-stone-200 bg-white/90 px-2.5 py-1.5 text-stone-600 backdrop-blur">
             {visibleEdges.length} edges
@@ -538,7 +610,7 @@ export function UniverseGraphView({ graph }: { graph: UniverseGraph }) {
           </div>
         )}
         <p className="pointer-events-none absolute bottom-4 left-4 hidden text-xs text-stone-400 sm:block">
-          拖动画布 · 滚轮缩放 · 双击打开文档
+          拖动空白处平移 · 滚轮缩放 · 单击选择 · 双击打开
         </p>
       </div>
 
