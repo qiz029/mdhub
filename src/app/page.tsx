@@ -1,7 +1,7 @@
 import { listPublished, type PublishedEntry } from "@/lib/vault";
 import Link from "next/link";
 import { Nav } from "@/components/Nav";
-import { TreeSidebar } from "@/components/TreeSidebar";
+import { DocumentBrowser } from "@/components/DocumentBrowser";
 
 export const dynamic = "force-dynamic";
 
@@ -66,39 +66,12 @@ export default async function HomePage() {
     <div>
       <Nav />
       <main className="mx-auto max-w-5xl xl:max-w-6xl px-6 py-10">
-        <div className="flex gap-8">
-          <aside className="hidden md:block w-64 shrink-0">
-            <div className="sticky top-6 self-start">
-              <TreeSidebar entries={entries} />
-            </div>
-          </aside>
-          <div className="min-w-0 flex-1 space-y-8">
-            <div>
-              <h1 className="text-2xl font-bold tracking-tight text-stone-900">
-                已发布
-              </h1>
-              <p className="mt-1 text-sm text-stone-400">
-                来自家庭知识库的笔记与报告
-              </p>
-            </div>
-
-            {entries.length === 0 ? (
-              <div className="py-24 text-center">
-                <p className="text-sm text-stone-400">Nothing published yet.</p>
-                <p className="mt-1 text-xs text-stone-300">
-                  Add <code className="text-stone-400">publish: true</code> to a
-                  note&apos;s frontmatter to see it here.
-                </p>
-              </div>
-            ) : (
-              <div className="overflow-hidden">
-                {entries.map((entry) => (
-                  <Card key={entry.slug} entry={entry} />
-                ))}
-              </div>
-            )}
-          </div>
-        </div>
+        <DocumentBrowser
+          documents={entries.map((entry) => ({
+            entry,
+            card: <Card key={entry.slug} entry={entry} />,
+          }))}
+        />
       </main>
     </div>
   );

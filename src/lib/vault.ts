@@ -26,15 +26,20 @@ export async function listPublished(): Promise<PublishedEntry[]> {
     });
     if (!res.ok) return [];
     const docs: ApiDocumentSummary[] = await res.json();
-    return docs.map((d) => ({
-      slug: d.slug,
-      title: d.title,
-      source: d.slug.startsWith("_agent/") ? "agent" : "human",
-      publishedAt: d.updated,
-      excerpt: d.excerpt,
-      category: typeof d.category === "string" ? d.category : "",
-      tags: Array.isArray(d.tags) ? d.tags.map(String) : [],
-    }));
+    return docs
+      .map<PublishedEntry>((d) => ({
+        slug: d.slug,
+        title: d.title,
+        source: d.slug.startsWith("_agent/") ? "agent" : "human",
+        publishedAt: d.updated,
+        excerpt: d.excerpt,
+        category: typeof d.category === "string" ? d.category : "",
+        tags: Array.isArray(d.tags) ? d.tags.map(String) : [],
+      }))
+      .sort(
+        (a, b) =>
+          b.publishedAt - a.publishedAt || a.slug.localeCompare(b.slug),
+      );
   } catch {
     return [];
   }

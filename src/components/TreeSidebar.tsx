@@ -1,8 +1,8 @@
 "use client";
 
-import { useState } from "react";
 import { ChevronRight, FileText, Folder } from "lucide-react";
 import type { PublishedEntry } from "@/lib/vault";
+import { entryDirectoryPath } from "@/lib/document-tree";
 
 type FolderNode = {
   folders: Map<string, FolderNode>;
@@ -13,17 +13,11 @@ function newFolder(): FolderNode {
   return { folders: new Map(), notes: [] };
 }
 
-function dirPath(entry: PublishedEntry): string[] {
-  if (entry.category) return entry.category.split("/").filter(Boolean);
-  const parts = entry.slug.split("/");
-  return parts.slice(0, -1).filter(Boolean);
-}
-
 function buildTree(entries: PublishedEntry[]): FolderNode {
   const root = newFolder();
   for (const entry of entries) {
     let node = root;
-    for (const seg of dirPath(entry)) {
+    for (const seg of entryDirectoryPath(entry)) {
       let next = node.folders.get(seg);
       if (!next) {
         next = newFolder();
@@ -36,13 +30,21 @@ function buildTree(entries: PublishedEntry[]): FolderNode {
   return root;
 }
 
-export function TreeSidebar({ entries }: { entries: PublishedEntry[] }) {
-  const [path, setPath] = useState<string[]>([]);
+type TreeSidebarProps = {
+  entries: PublishedEntry[];
+  selectedPath: string[];
+  onSelectPath: (path: string[]) => void;
+};
 
+export function TreeSidebar({
+  entries,
+  selectedPath,
+  onSelectPath,
+}: TreeSidebarProps) {
   if (entries.length === 0) return null;
 
   let node = buildTree(entries);
-  for (const seg of path) {
+  for (const seg of selectedPath) {
     const next = node.folders.get(seg);
     if (!next) {
       node = newFolder();
@@ -55,7 +57,7 @@ export function TreeSidebar({ entries }: { entries: PublishedEntry[] }) {
     a.localeCompare(b, "zh"),
   );
   const notes = [...node.notes].sort((a, b) => b.publishedAt - a.publishedAt);
-  const crumbs = ["全部", ...path];
+  const crumbs = ["全部", ...selectedPath];
 
   function go(slug: string) {
     const encoded = slug
@@ -78,7 +80,7 @@ export function TreeSidebar({ entries }: { entries: PublishedEntry[] }) {
               ) : (
                 <button
                   type="button"
-                  onClick={() => setPath(path.slice(0, i))}
+                  onClick={() => onSelectPath(selectedPath.slice(0, i))}
                   className="hover:text-stone-700 transition-colors"
                 >
                   {name}
@@ -94,7 +96,7 @@ export function TreeSidebar({ entries }: { entries: PublishedEntry[] }) {
           <li key={`d-${name}`}>
             <button
               type="button"
-              onClick={() => setPath([...path, name])}
+              onClick={() => onSelectPath([...selectedPath, name])}
               className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-sm text-stone-700 font-medium hover:bg-stone-50 transition-colors"
             >
               <Folder size={15} className="shrink-0 text-stone-400" />
