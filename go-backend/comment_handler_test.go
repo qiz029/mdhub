@@ -11,49 +11,20 @@ import (
 	"github.com/DATA-DOG/go-sqlmock"
 )
 
-func isolateEditAccess(t *testing.T) {
-	t.Helper()
-	previousToken, previousAddress := editToken, listenAddr
-	editToken, listenAddr = "secret", "127.0.0.1:10002"
-	t.Cleanup(func() { editToken, listenAddr = previousToken, previousAddress })
-}
-
-func TestGetCommentsHidesDraftThreadsWithoutEditAccess(t *testing.T) {
+func TestGetCommentsReturnsThreads(t *testing.T) {
 	mock := withMockDatabase(t)
-	isolateEditAccess(t)
 	mock.ExpectQuery("FROM comment_threads").
-		WithArgs("draft", false).
+		WithArgs("draft").
 		WillReturnRows(sqlmock.NewRows([]string{
 			"id", "quote", "prefix", "suffix", "author", "text", "created_at",
-		}))
+		}).AddRow("thread", "some quote", "before", "after", "Todd", "note", time.Now()))
 
+	// comments are readable for any document, published or not
 	request := httptest.NewRequest(http.MethodGet, "/api/documents/draft/comments", nil)
 	response := httptest.NewRecorder()
 	getComments(response, request, "draft")
 
-	if response.Code != http.StatusOK || strings.TrimSpace(response.Body.String()) != "[]" {
-		t.Fatalf("status = %d, body = %q", response.Code, response.Body.String())
-	}
-	if err := mock.ExpectationsWereMet(); err != nil {
-		t.Fatal(err)
-	}
-}
-
-func TestGetCommentsAllowsDraftThreadsWithEditAccess(t *testing.T) {
-	mock := withMockDatabase(t)
-	isolateEditAccess(t)
-	mock.ExpectQuery("FROM comment_threads").
-		WithArgs("draft", true).
-		WillReturnRows(sqlmock.NewRows([]string{
-			"id", "quote", "prefix", "suffix", "author", "text", "created_at",
-		}).AddRow("thread", "private quote", "before", "after", "Todd", "note", time.Now()))
-
-	request := httptest.NewRequest(http.MethodGet, "/api/documents/draft/comments", nil)
-	request.Header.Set("X-MDHub-Edit-Token", "secret")
-	response := httptest.NewRecorder()
-	getComments(response, request, "draft")
-
-	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "private quote") {
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "some quote") {
 		t.Fatalf("status = %d, body = %q", response.Code, response.Body.String())
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {

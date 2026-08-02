@@ -1,6 +1,5 @@
 import { NextRequest } from "next/server";
 import { API_URL } from "@/lib/config";
-import { requireEditToken } from "@/lib/edit-auth";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -10,8 +9,6 @@ async function proxy(
   id: string,
   method: "POST" | "DELETE",
 ): Promise<Response> {
-  const unauthorized = requireEditToken(req);
-  if (unauthorized) return unauthorized;
   if (!/^\d+$/.test(id)) {
     return Response.json({ error: "invalid feed id" }, { status: 400 });
   }
@@ -23,7 +20,6 @@ async function proxy(
         method,
         headers: {
           "Content-Type": "application/json",
-          "X-MDHub-Edit-Token": process.env.MDHUB_EDIT_TOKEN || "",
         },
         body: method === "POST" ? await req.text() : undefined,
         cache: "no-store",

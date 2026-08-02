@@ -1,6 +1,5 @@
 import { NextRequest } from "next/server";
 import { API_URL } from "@/lib/config";
-import { requireEditToken } from "@/lib/edit-auth";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -11,9 +10,6 @@ export async function PUT(
   req: NextRequest,
   { params }: { params: Promise<{ slug: string[] }> },
 ) {
-  const unauthorized = requireEditToken(req);
-  if (unauthorized) return unauthorized;
-
   const { slug: segments } = await params;
   const contentLength = Number(req.headers.get("content-length"));
   if (Number.isFinite(contentLength) && contentLength > MAX_DOCUMENT_BYTES) {
@@ -29,7 +25,6 @@ export async function PUT(
       method: "PUT",
       headers: {
         "Content-Type": "text/markdown; charset=utf-8",
-        "X-MDHub-Edit-Token": process.env.MDHUB_EDIT_TOKEN || "",
       },
       body: req.body,
       cache: "no-store",

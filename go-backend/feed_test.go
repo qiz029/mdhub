@@ -280,7 +280,6 @@ func TestListFeeds(t *testing.T) {
 func TestCreateFeed(t *testing.T) {
 	t.Run("subscribes a reachable feed", func(t *testing.T) {
 		mock := withMockDatabase(t)
-		isolateEditAccess(t)
 		stubPollFeedLater(t)
 		srv := feedServer(t, func(w http.ResponseWriter, r *http.Request) {
 			w.Write([]byte(rssFixture))
@@ -291,7 +290,6 @@ func TestCreateFeed(t *testing.T) {
 
 		request := httptest.NewRequest(http.MethodPost, "/api/feeds",
 			strings.NewReader(fmt.Sprintf(`{"url":%q}`, srv.URL)))
-		request.Header.Set("X-MDHub-Edit-Token", "secret")
 		response := httptest.NewRecorder()
 		handleFeeds(response, request)
 
@@ -307,7 +305,6 @@ func TestCreateFeed(t *testing.T) {
 
 	t.Run("subscribes with a description", func(t *testing.T) {
 		mock := withMockDatabase(t)
-		isolateEditAccess(t)
 		stubPollFeedLater(t)
 		srv := feedServer(t, func(w http.ResponseWriter, r *http.Request) {
 			w.Write([]byte(rssFixture))
@@ -318,7 +315,6 @@ func TestCreateFeed(t *testing.T) {
 
 		request := httptest.NewRequest(http.MethodPost, "/api/feeds",
 			strings.NewReader(fmt.Sprintf(`{"url":%q,"description":" 魔兽世界，\n关注团本机制设计 "}`, srv.URL)))
-		request.Header.Set("X-MDHub-Edit-Token", "secret")
 		response := httptest.NewRecorder()
 		handleFeeds(response, request)
 
@@ -332,13 +328,11 @@ func TestCreateFeed(t *testing.T) {
 
 	t.Run("unparseable feed is 400 with the error message", func(t *testing.T) {
 		withMockDatabase(t)
-		isolateEditAccess(t)
 		srv := feedServer(t, func(w http.ResponseWriter, r *http.Request) {
 			w.Write([]byte("this is not a feed"))
 		})
 		request := httptest.NewRequest(http.MethodPost, "/api/feeds",
 			strings.NewReader(fmt.Sprintf(`{"url":%q}`, srv.URL)))
-		request.Header.Set("X-MDHub-Edit-Token", "secret")
 		response := httptest.NewRecorder()
 		handleFeeds(response, request)
 
@@ -350,10 +344,8 @@ func TestCreateFeed(t *testing.T) {
 
 	t.Run("invalid url is 400", func(t *testing.T) {
 		withMockDatabase(t)
-		isolateEditAccess(t)
 		request := httptest.NewRequest(http.MethodPost, "/api/feeds",
 			strings.NewReader(`{"url":"ftp://example.com/feed"}`))
-		request.Header.Set("X-MDHub-Edit-Token", "secret")
 		response := httptest.NewRecorder()
 		handleFeeds(response, request)
 		if response.Code != http.StatusBadRequest {
@@ -363,7 +355,6 @@ func TestCreateFeed(t *testing.T) {
 
 	t.Run("duplicate url is 409", func(t *testing.T) {
 		mock := withMockDatabase(t)
-		isolateEditAccess(t)
 		srv := feedServer(t, func(w http.ResponseWriter, r *http.Request) {
 			w.Write([]byte(rssFixture))
 		})
@@ -373,7 +364,6 @@ func TestCreateFeed(t *testing.T) {
 
 		request := httptest.NewRequest(http.MethodPost, "/api/feeds",
 			strings.NewReader(fmt.Sprintf(`{"url":%q}`, srv.URL)))
-		request.Header.Set("X-MDHub-Edit-Token", "secret")
 		response := httptest.NewRecorder()
 		handleFeeds(response, request)
 
@@ -384,30 +374,16 @@ func TestCreateFeed(t *testing.T) {
 			t.Fatal(err)
 		}
 	})
-
-	t.Run("edit token required", func(t *testing.T) {
-		withMockDatabase(t)
-		isolateEditAccess(t)
-		request := httptest.NewRequest(http.MethodPost, "/api/feeds",
-			strings.NewReader(`{"url":"https://example.com/feed.xml"}`))
-		response := httptest.NewRecorder()
-		handleFeeds(response, request)
-		if response.Code != http.StatusUnauthorized {
-			t.Fatalf("status = %d, want 401", response.Code)
-		}
-	})
 }
 
 func TestUpdateFeed(t *testing.T) {
 	t.Run("toggles enabled", func(t *testing.T) {
 		mock := withMockDatabase(t)
-		isolateEditAccess(t)
 		mock.ExpectExec(regexp.QuoteMeta("UPDATE feeds SET enabled=$1 WHERE id=$2")).
 			WithArgs(false, "1").
 			WillReturnResult(sqlmock.NewResult(0, 1))
 		request := httptest.NewRequest(http.MethodPost, "/api/feeds/1",
 			strings.NewReader(`{"enabled":false}`))
-		request.Header.Set("X-MDHub-Edit-Token", "secret")
 		response := httptest.NewRecorder()
 		handleFeed(response, request)
 		if response.Code != http.StatusOK {
@@ -420,13 +396,11 @@ func TestUpdateFeed(t *testing.T) {
 
 	t.Run("description only leaves enabled untouched", func(t *testing.T) {
 		mock := withMockDatabase(t)
-		isolateEditAccess(t)
 		mock.ExpectExec(regexp.QuoteMeta("UPDATE feeds SET description=$1 WHERE id=$2")).
 			WithArgs("关注团本机制设计", "1").
 			WillReturnResult(sqlmock.NewResult(0, 1))
 		request := httptest.NewRequest(http.MethodPost, "/api/feeds/1",
 			strings.NewReader(`{"description":"关注团本机制设计"}`))
-		request.Header.Set("X-MDHub-Edit-Token", "secret")
 		response := httptest.NewRecorder()
 		handleFeed(response, request)
 		if response.Code != http.StatusOK {
@@ -439,13 +413,11 @@ func TestUpdateFeed(t *testing.T) {
 
 	t.Run("enabled and description together", func(t *testing.T) {
 		mock := withMockDatabase(t)
-		isolateEditAccess(t)
 		mock.ExpectExec(regexp.QuoteMeta("UPDATE feeds SET enabled=$1, description=$2 WHERE id=$3")).
 			WithArgs(true, "新描述", "1").
 			WillReturnResult(sqlmock.NewResult(0, 1))
 		request := httptest.NewRequest(http.MethodPost, "/api/feeds/1",
 			strings.NewReader(`{"enabled":true,"description":"新描述"}`))
-		request.Header.Set("X-MDHub-Edit-Token", "secret")
 		response := httptest.NewRecorder()
 		handleFeed(response, request)
 		if response.Code != http.StatusOK {
@@ -458,10 +430,8 @@ func TestUpdateFeed(t *testing.T) {
 
 	t.Run("empty update is 400", func(t *testing.T) {
 		withMockDatabase(t)
-		isolateEditAccess(t)
 		request := httptest.NewRequest(http.MethodPost, "/api/feeds/1",
 			strings.NewReader(`{}`))
-		request.Header.Set("X-MDHub-Edit-Token", "secret")
 		response := httptest.NewRecorder()
 		handleFeed(response, request)
 		if response.Code != http.StatusBadRequest {
@@ -471,13 +441,11 @@ func TestUpdateFeed(t *testing.T) {
 
 	t.Run("unknown id is 404", func(t *testing.T) {
 		mock := withMockDatabase(t)
-		isolateEditAccess(t)
 		mock.ExpectExec("UPDATE feeds SET enabled").
 			WithArgs(true, "99").
 			WillReturnResult(sqlmock.NewResult(0, 0))
 		request := httptest.NewRequest(http.MethodPost, "/api/feeds/99",
 			strings.NewReader(`{"enabled":true}`))
-		request.Header.Set("X-MDHub-Edit-Token", "secret")
 		response := httptest.NewRecorder()
 		handleFeed(response, request)
 		if response.Code != http.StatusNotFound {
@@ -492,13 +460,11 @@ func TestUpdateFeed(t *testing.T) {
 func TestHandleFeedPoll(t *testing.T) {
 	t.Run("queues a manual poll", func(t *testing.T) {
 		mock := withMockDatabase(t)
-		isolateEditAccess(t)
 		stubPollFeedLater(t)
 		mock.ExpectQuery(regexp.QuoteMeta("SELECT EXISTS(SELECT 1 FROM feeds WHERE id=$1)")).
 			WithArgs("1").
 			WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(true))
 		request := httptest.NewRequest(http.MethodPost, "/api/feeds/1/poll", nil)
-		request.Header.Set("X-MDHub-Edit-Token", "secret")
 		response := httptest.NewRecorder()
 		handleFeed(response, request)
 		if response.Code != http.StatusOK {
@@ -511,12 +477,10 @@ func TestHandleFeedPoll(t *testing.T) {
 
 	t.Run("unknown id is 404", func(t *testing.T) {
 		mock := withMockDatabase(t)
-		isolateEditAccess(t)
 		mock.ExpectQuery("SELECT EXISTS").
 			WithArgs("99").
 			WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(false))
 		request := httptest.NewRequest(http.MethodPost, "/api/feeds/99/poll", nil)
-		request.Header.Set("X-MDHub-Edit-Token", "secret")
 		response := httptest.NewRecorder()
 		handleFeed(response, request)
 		if response.Code != http.StatusNotFound {
@@ -524,17 +488,6 @@ func TestHandleFeedPoll(t *testing.T) {
 		}
 		if err := mock.ExpectationsWereMet(); err != nil {
 			t.Fatal(err)
-		}
-	})
-
-	t.Run("edit token required", func(t *testing.T) {
-		withMockDatabase(t)
-		isolateEditAccess(t)
-		request := httptest.NewRequest(http.MethodPost, "/api/feeds/1/poll", nil)
-		response := httptest.NewRecorder()
-		handleFeed(response, request)
-		if response.Code != http.StatusUnauthorized {
-			t.Fatalf("status = %d, want 401", response.Code)
 		}
 	})
 }
@@ -542,13 +495,11 @@ func TestHandleFeedPoll(t *testing.T) {
 func TestDeleteFeed(t *testing.T) {
 	t.Run("unsubscribes and keeps sparks", func(t *testing.T) {
 		mock := withMockDatabase(t)
-		isolateEditAccess(t)
 		mock.ExpectExec(regexp.QuoteMeta("DELETE FROM feeds WHERE id=$1")).
 			WithArgs("1").
 			WillReturnResult(sqlmock.NewResult(0, 1))
 		// no DELETE FROM documents expected: imported sparks stay
 		request := httptest.NewRequest(http.MethodDelete, "/api/feeds/1", nil)
-		request.Header.Set("X-MDHub-Edit-Token", "secret")
 		response := httptest.NewRecorder()
 		handleFeed(response, request)
 		if response.Code != http.StatusOK {
@@ -561,12 +512,10 @@ func TestDeleteFeed(t *testing.T) {
 
 	t.Run("unknown id is 404", func(t *testing.T) {
 		mock := withMockDatabase(t)
-		isolateEditAccess(t)
 		mock.ExpectExec("DELETE FROM feeds").
 			WithArgs("99").
 			WillReturnResult(sqlmock.NewResult(0, 0))
 		request := httptest.NewRequest(http.MethodDelete, "/api/feeds/99", nil)
-		request.Header.Set("X-MDHub-Edit-Token", "secret")
 		response := httptest.NewRecorder()
 		handleFeed(response, request)
 		if response.Code != http.StatusNotFound {
@@ -574,17 +523,6 @@ func TestDeleteFeed(t *testing.T) {
 		}
 		if err := mock.ExpectationsWereMet(); err != nil {
 			t.Fatal(err)
-		}
-	})
-
-	t.Run("edit token required", func(t *testing.T) {
-		withMockDatabase(t)
-		isolateEditAccess(t)
-		request := httptest.NewRequest(http.MethodDelete, "/api/feeds/1", nil)
-		response := httptest.NewRecorder()
-		handleFeed(response, request)
-		if response.Code != http.StatusUnauthorized {
-			t.Fatalf("status = %d, want 401", response.Code)
 		}
 	})
 }

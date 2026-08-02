@@ -11,8 +11,8 @@ package main
 // ticker and manual polls from overlapping. Disabled when
 // MDHUB_FEED_INTERVAL is "0". The one-shot -import flow never starts it.
 //
-// Management API follows the usual model: reads are public, writes need the
-// edit token.
+// Management API: the whole API is open — authentication, when needed,
+// lives at the ingress layer, not inside the app.
 
 import (
 	"crypto/sha256"
@@ -312,8 +312,8 @@ type feedItem struct {
 	CreatedAt     int64  `json:"created_at"` // Unix ms
 }
 
-// handleFeeds dispatches /api/feeds: GET lists subscriptions (public), POST
-// subscribes a new feed (edit token).
+// handleFeeds dispatches /api/feeds: GET lists subscriptions, POST
+// subscribes a new feed.
 func handleFeeds(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
@@ -366,9 +366,6 @@ func listFeeds(w http.ResponseWriter, r *http.Request) {
 // so bad feeds are rejected with the actual error, then the row is inserted
 // and a first full poll runs in the background.
 func createFeed(w http.ResponseWriter, r *http.Request) {
-	if !requireEditAccess(w, r) {
-		return
-	}
 	var body struct {
 		URL         string `json:"url"`
 		Description string `json:"description"`
@@ -442,9 +439,6 @@ func sanitizeFeedDescription(s string) string {
 // {"enabled": bool} and/or {"description": "..."}. Changing the description
 // only affects entries fetched afterwards; existing sparks are not rewritten.
 func updateFeed(w http.ResponseWriter, r *http.Request, id string) {
-	if !requireEditAccess(w, r) {
-		return
-	}
 	var body struct {
 		Enabled     *bool   `json:"enabled"`
 		Description *string `json:"description"`
@@ -490,9 +484,6 @@ func handleFeedPoll(w http.ResponseWriter, r *http.Request, id string) {
 		httpError(w, fmt.Errorf("method not allowed"), http.StatusMethodNotAllowed)
 		return
 	}
-	if !requireEditAccess(w, r) {
-		return
-	}
 	var exists bool
 	if err := db.QueryRow("SELECT EXISTS(SELECT 1 FROM feeds WHERE id=$1)", id).Scan(&exists); err != nil {
 		httpError(w, err, http.StatusInternalServerError)
@@ -509,9 +500,6 @@ func handleFeedPoll(w http.ResponseWriter, r *http.Request, id string) {
 // deleteFeed unsubscribes a feed. Imported sparks are kept — once an entry
 // is in the vault, it is yours.
 func deleteFeed(w http.ResponseWriter, r *http.Request, id string) {
-	if !requireEditAccess(w, r) {
-		return
-	}
 	result, err := db.Exec("DELETE FROM feeds WHERE id=$1", id)
 	if err != nil {
 		httpError(w, err, http.StatusInternalServerError)

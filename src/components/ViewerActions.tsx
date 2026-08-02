@@ -13,15 +13,7 @@ export function ViewerActions({
   slug: string;
 }) {
   const [copied, setCopied] = useState(false);
-  const [editToken, setEditToken] = useState<string | null>(null);
-
-  function beginEditing() {
-    const stored = sessionStorage.getItem("mdhub-edit-token") || "";
-    const token = stored || window.prompt("输入 MDHub 编辑令牌") || "";
-    if (!token) return;
-    sessionStorage.setItem("mdhub-edit-token", token);
-    setEditToken(token);
-  }
+  const [editing, setEditing] = useState(false);
 
   async function copyMarkdown() {
     try {
@@ -57,7 +49,7 @@ export function ViewerActions({
       <div className="flex shrink-0 items-center gap-2">
         <button
           type="button"
-          onClick={beginEditing}
+          onClick={() => setEditing(true)}
           className="rounded-md bg-stone-900 px-4 py-2.5 text-sm font-medium text-white hover:opacity-85"
         >
           Edit
@@ -77,12 +69,11 @@ export function ViewerActions({
           Download
         </button>
       </div>
-      {editToken && (
+      {editing && (
         <MarkdownEditor
           slug={slug}
           initialMarkdown={markdown}
-          editToken={editToken}
-          onClose={() => setEditToken(null)}
+          onClose={() => setEditing(false)}
         />
       )}
     </>

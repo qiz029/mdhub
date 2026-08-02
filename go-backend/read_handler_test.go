@@ -135,7 +135,6 @@ func TestHandleCommentsCreatesReplyForPublishedDocument(t *testing.T) {
 func TestHandleReindexReloadsSearchAndEmbeddingProjections(t *testing.T) {
 	mock := withMockDatabase(t)
 	isolatePublicationState(t)
-	isolateEditAccess(t)
 	mock.ExpectQuery("SELECT slug, title, content, file_mtime FROM documents").
 		WillReturnRows(sqlmock.NewRows([]string{"slug", "title", "content", "file_mtime"}).
 			AddRow("note", "Note", "Body", time.Unix(100, 0)))
@@ -143,7 +142,6 @@ func TestHandleReindexReloadsSearchAndEmbeddingProjections(t *testing.T) {
 		WillReturnRows(sqlmock.NewRows([]string{"slug", "embedding"}).
 			AddRow("note", encodeVec([]float32{1, 0})))
 	request := httptest.NewRequest(http.MethodPost, "/api/reindex", nil)
-	request.Header.Set("X-MDHub-Edit-Token", "secret")
 	response := httptest.NewRecorder()
 
 	handleReindex(response, request)
@@ -159,11 +157,9 @@ func TestHandleReindexReloadsSearchAndEmbeddingProjections(t *testing.T) {
 func TestHandleReclassifyQueuesEveryReturnedSlug(t *testing.T) {
 	mock := withMockDatabase(t)
 	isolatePublicationState(t)
-	isolateEditAccess(t)
 	mock.ExpectQuery("UPDATE documents SET category_path").
 		WillReturnRows(sqlmock.NewRows([]string{"slug"}).AddRow("a").AddRow("b"))
 	request := httptest.NewRequest(http.MethodPost, "/api/reclassify", nil)
-	request.Header.Set("X-MDHub-Edit-Token", "secret")
 	response := httptest.NewRecorder()
 
 	handleReclassify(response, request)

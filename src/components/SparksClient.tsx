@@ -28,34 +28,7 @@ import {
 } from "@/lib/feeds";
 import { GrowthChart } from "@/components/GrowthChart";
 
-const TOKEN_KEY = "mdhub-edit-token";
 const PAGE_SIZE = 10;
-
-// Reads are public (personal space; auth is handled at the edge). The edit
-// token is only needed for writes — capture, verdicts, bounty claims — and
-// is fetched lazily: use the cached token or prompt, and on a 401 drop the
-// cached token and prompt once more before giving up.
-async function fetchWithEditToken(
-  input: string,
-  init: RequestInit,
-): Promise<Response> {
-  let lastRes: Response | null = null;
-  for (let attempt = 0; attempt < 2; attempt++) {
-    let token = sessionStorage.getItem(TOKEN_KEY) || "";
-    if (!token) {
-      token = window.prompt("输入 MDHub 编辑令牌") || "";
-      if (!token) throw new Error("需要编辑令牌，已取消");
-      sessionStorage.setItem(TOKEN_KEY, token);
-    }
-    lastRes = await fetch(input, {
-      ...init,
-      headers: { ...init.headers, "X-MDHub-Edit-Token": token },
-    });
-    if (lastRes.status !== 401) return lastRes;
-    sessionStorage.removeItem(TOKEN_KEY);
-  }
-  return lastRes!;
-}
 
 function verdictLabel(verdict: CollisionVerdict): string {
   switch (verdict) {
@@ -339,8 +312,7 @@ export function SparksClient() {
     }
   }
 
-  // The feeds tab loads on entry; the list is public, only mutations need
-  // the edit token.
+  // The feeds tab loads on entry.
   useEffect(() => {
     if (tab === "feeds") {
       setFeedError("");
@@ -354,7 +326,7 @@ export function SparksClient() {
     setSubscribing(true);
     setFeedError("");
     try {
-      const res = await fetchWithEditToken("/mdhub/api/feeds", {
+      const res = await fetch("/mdhub/api/feeds", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ url, description: feedDescription.trim() }),
@@ -388,7 +360,7 @@ export function SparksClient() {
       ),
     );
     try {
-      const res = await fetchWithEditToken(`/mdhub/api/feeds/${feed.id}`, {
+      const res = await fetch(`/mdhub/api/feeds/${feed.id}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ enabled: !feed.enabled }),
@@ -409,7 +381,7 @@ export function SparksClient() {
     setBusyFeedId(feed.id);
     setFeedError("");
     try {
-      const res = await fetchWithEditToken(
+      const res = await fetch(
         `/mdhub/api/feeds/${feed.id}/poll`,
         { method: "POST" },
       );
@@ -430,7 +402,7 @@ export function SparksClient() {
     setFeedError("");
     const description = descriptionDraft.trim();
     try {
-      const res = await fetchWithEditToken(`/mdhub/api/feeds/${feed.id}`, {
+      const res = await fetch(`/mdhub/api/feeds/${feed.id}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ description }),
@@ -459,7 +431,7 @@ export function SparksClient() {
     setBusyFeedId(feed.id);
     setFeedError("");
     try {
-      const res = await fetchWithEditToken(`/mdhub/api/feeds/${feed.id}`, {
+      const res = await fetch(`/mdhub/api/feeds/${feed.id}`, {
         method: "DELETE",
       });
       if (!res.ok) throw new Error(`删除失败（HTTP ${res.status}）`);
@@ -487,7 +459,7 @@ export function SparksClient() {
           .split("/")
           .map((part) => encodeURIComponent(part))
           .join("/");
-      const res = await fetchWithEditToken(endpoint, {
+      const res = await fetch(endpoint, {
         method: "PUT",
         headers: { "Content-Type": "text/markdown; charset=utf-8" },
         body: sparkMarkdown(text, now),
@@ -514,7 +486,7 @@ export function SparksClient() {
       items.map((item) => (item.id === id ? { ...item, verdict } : item)),
     );
     try {
-      const res = await fetchWithEditToken(`/mdhub/api/collisions/${id}`, {
+      const res = await fetch(`/mdhub/api/collisions/${id}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ verdict }),
@@ -528,8 +500,8 @@ export function SparksClient() {
     }
   }
 
-  // Claiming a bounty is writing the answer: PUT the answer note first
-  // (needs the edit token), then close the bounty by posting its slug.
+  // Claiming a bounty is writing the answer: PUT the answer note first,
+  // then close the bounty by posting its slug.
   async function submitClaim(collision: Collision) {
     if (claiming) return;
     setClaiming(true);
@@ -543,7 +515,7 @@ export function SparksClient() {
           .split("/")
           .map((part) => encodeURIComponent(part))
           .join("/");
-      const putRes = await fetchWithEditToken(endpoint, {
+      const putRes = await fetch(endpoint, {
         method: "PUT",
         headers: { "Content-Type": "text/markdown; charset=utf-8" },
         body: answerMarkdown(collision, claimDraft),
@@ -554,7 +526,7 @@ export function SparksClient() {
         };
         throw new Error(result.error || `保存回答失败（HTTP ${putRes.status}）`);
       }
-      const answerRes = await fetchWithEditToken(
+      const answerRes = await fetch(
         `/mdhub/api/collisions/${collision.id}/answer`,
         {
           method: "POST",
@@ -630,7 +602,7 @@ export function SparksClient() {
             {saving ? "保存中…" : "捕获"}
           </button>
           <span className="text-xs text-stone-400">
-            保存为 _sparks/ 下的碎片（type: fleeting），需编辑令牌
+            保存为 _sparks/ 下的碎片（type: fleeting）
           </span>
         </div>
       </section>
@@ -949,7 +921,7 @@ export function SparksClient() {
                 className="mt-2 w-full rounded-md border border-stone-300 bg-white px-3 py-2 text-sm text-stone-800 placeholder:text-stone-400 focus:border-stone-500 focus:outline-none"
               />
               <p className="mt-1.5 text-xs text-stone-400">
-                新条目会自动变成碎片，进入碰撞和灵感流。订阅需编辑令牌。
+                新条目会自动变成碎片，进入碰撞和灵感流。
               </p>
               {feedError && (
                 <p className="mt-2 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">

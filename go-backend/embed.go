@@ -402,9 +402,6 @@ func handleReembed(w http.ResponseWriter, r *http.Request) {
 		httpError(w, fmt.Errorf("method not allowed"), 405)
 		return
 	}
-	if !requireEditAccess(w, r) {
-		return
-	}
 	rows, err := db.Query("SELECT slug FROM documents WHERE published=true")
 	if err != nil {
 		httpError(w, err, 500)

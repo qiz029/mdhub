@@ -365,9 +365,6 @@ func handleCollision(w http.ResponseWriter, r *http.Request) {
 		httpError(w, fmt.Errorf("method not allowed"), http.StatusMethodNotAllowed)
 		return
 	}
-	if !requireEditAccess(w, r) {
-		return
-	}
 
 	var body struct {
 		Verdict string `json:"verdict"`
@@ -398,13 +395,10 @@ func handleCollision(w http.ResponseWriter, r *http.Request) {
 
 // handleCollisionAnswer claims a collision's bounty question: the caller has
 // written a note answering it, and the collision records that note's slug.
-// Re-answering overwrites the previous claim. POST only, edit token required.
+// Re-answering overwrites the previous claim. POST only.
 func handleCollisionAnswer(w http.ResponseWriter, r *http.Request, id string) {
 	if r.Method != http.MethodPost {
 		httpError(w, fmt.Errorf("method not allowed"), http.StatusMethodNotAllowed)
-		return
-	}
-	if !requireEditAccess(w, r) {
 		return
 	}
 
@@ -499,9 +493,6 @@ func handleBlindbox(w http.ResponseWriter, r *http.Request) {
 func handleRecollide(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		httpError(w, fmt.Errorf("method not allowed"), http.StatusMethodNotAllowed)
-		return
-	}
-	if !requireEditAccess(w, r) {
 		return
 	}
 	mu.RLock()

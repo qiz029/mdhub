@@ -64,22 +64,20 @@ npm run dev        # → http://localhost:10001/mdhub
 brew install ollama && brew services start ollama
 ollama pull qwen3-embedding:0.6b
 # In go-backend/.env: MDHUB_EMBED_URL="http://localhost:11434", restart the backend, then:
-curl -X POST -H "X-MDHub-Edit-Token: $MDHUB_EDIT_TOKEN" \
-  http://localhost:10002/api/reembed   # backfill existing notes
+curl -X POST http://localhost:10002/api/reembed   # backfill existing notes
 ```
 
 ## Publishing a note
 
-The primary way to publish is the write API — agents and scripts upload raw markdown directly, no filesystem involved:
+The primary way to publish is the write API — agents and scripts upload raw markdown directly, no filesystem involved. Writes need no token; this is a personal space and authentication belongs at the edge, so keep the site (and the Go API) behind an authenticated proxy — anyone who can reach them can write.
 
 ```bash
 # Create or update a note (body is the full raw markdown; slug is chosen by the caller):
-curl -X PUT -H "X-MDHub-Edit-Token: $MDHUB_EDIT_TOKEN" \
-  --data-binary @note.md http://localhost:10002/api/documents/translations/note
+curl -X PUT --data-binary @note.md \
+  http://localhost:10002/api/documents/translations/note
 
 # Delete:
-curl -X DELETE -H "X-MDHub-Edit-Token: $MDHUB_EDIT_TOKEN" \
-  http://localhost:10002/api/documents/translations/note
+curl -X DELETE http://localhost:10002/api/documents/translations/note
 ```
 
 A note is publicly visible when its frontmatter has `publish: true`:
@@ -150,7 +148,6 @@ The home page lists all published notes, newest first. Each gets a URL at `/view
 |---|---|---|
 | `MDHUB_PG` | `postgres://mdhub:***@localhost:5432/mdhub` | PostgreSQL DSN |
 | `MDHUB_LISTEN` | `127.0.0.1:10002` | Listen address; expose deliberately only behind an authenticated proxy |
-| `MDHUB_EDIT_TOKEN` | _(unset = loopback document writes only; image uploads disabled)_ | Shared secret for document/image/maintenance writes; mandatory for non-loopback listen addresses |
 | `MDHUB_LLM_BASE_URL` | `https://api.openai.com/v1` | OpenAI-compatible chat API base |
 | `MDHUB_LLM_API_KEY` | _(unset = disabled)_ | LLM API key |
 | `MDHUB_LLM_MODEL` | `gpt-4o-mini` | LLM model for categorization |
@@ -168,7 +165,7 @@ The home page lists all published notes, newest first. Each gets a URL at `/view
 - **Anchored comments**: Readers select text to comment on; threads are stored in PG and shown beside the article.
 - **Tree sidebar**: The home page has a filesystem-style sidebar — drill down level by level, with a breadcrumb bar on top.
 - **LLM semantic categories**: Optionally, an OpenAI-compatible LLM organizes published notes into a category tree that drives the sidebar. The algorithm works like a B-tree: each note descends from the root into the best-fitting folder, and any node with more than 10 direct children is split — the LLM reads the full text of that node's notes and proposes named groups. All work is local to the affected node (no global recomputation), async on write only, never on the read path; degrades to plain directory grouping when no API key is set. Frontmatter `category:` pins a note manually (never moved by splits) and always wins. Rebuild the whole tree with `POST /api/reclassify`.
-- **Sparks & collision engine**: Fleeting captures (`type: fleeting`) skip the feed, search, categories, and Universe, but still get embedded. After each embed, a background worker compares the fresh vector against the whole library (cosine ≥ 0.55, top 5) and, when an LLM key is configured, writes a non-obvious connection plus one open question per new pair. The Sparks page offers quick capture, a collision stream for confirming or dismissing pairs, and an inspiration stream that flags stranded sparks (no collisions after 7 days). Three play loops sit on top of the engine — every game move is curation, writing, or review: collision questions become claimable **bounties**, closed by writing an answer note that wiki-links both sides; a deterministic **daily blind box** shows one side of a collision pair and lets you guess the other before revealing it; and a **growth chart** plots cumulative sparks/collisions with totals for confirmed pairs and answered bounties. This is a personal space: reads (sparks, collisions, viewing fleeting notes) are fully public and authentication belongs at the edge, while writes — capturing a spark, setting a verdict, claiming a bounty — still require the edit token. Growing up is manual: rewrite a spark into a note with `publish: true`.
+- **Sparks & collision engine**: Fleeting captures (`type: fleeting`) skip the feed, search, categories, and Universe, but still get embedded. After each embed, a background worker compares the fresh vector against the whole library (cosine ≥ 0.55, top 5) and, when an LLM key is configured, writes a non-obvious connection plus one open question per new pair. The Sparks page offers quick capture, a collision stream for confirming or dismissing pairs, and an inspiration stream that flags stranded sparks (no collisions after 7 days). Three play loops sit on top of the engine — every game move is curation, writing, or review: collision questions become claimable **bounties**, closed by writing an answer note that wiki-links both sides; a deterministic **daily blind box** shows one side of a collision pair and lets you guess the other before revealing it; and a **growth chart** plots cumulative sparks/collisions with totals for confirmed pairs and answered bounties. This is a personal space: reads (sparks, collisions, viewing fleeting notes) are fully public, writes need no token either — authentication belongs at the edge. Growing up is manual: rewrite a spark into a note with `publish: true`.
 - **RSS subscriptions**: A built-in poller fetches subscribed RSS/Atom feeds (conditional requests with ETag/Last-Modified, latest 20 items per fetch) and turns each new item into a spark with `source: rss/<feed title>` — imported entries flow through the same embed → collide pipeline as manual captures, and show a source badge in the inspiration stream. Manage subscriptions on the Sparks page's 订阅 tab: add by URL (validated with a live fetch), enable/disable, poll now, or unsubscribe (imported sparks are kept). Poll cadence is `MDHUB_FEED_INTERVAL` (default 30m, `0` disables the poller).
 - **Font presets**: 6 Chinese font options (system, serif, kai, hei, wenkai, fangsong).
 - **⌘K search**: Fuzzy full-text search with inline snippets.

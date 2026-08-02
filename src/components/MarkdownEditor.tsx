@@ -22,12 +22,10 @@ function documentEndpoint(slug: string): string {
 export function MarkdownEditor({
   slug,
   initialMarkdown,
-  editToken,
   onClose,
 }: {
   slug: string;
   initialMarkdown: string;
-  editToken: string;
   onClose: () => void;
 }) {
   const router = useRouter();
@@ -60,7 +58,7 @@ export function MarkdownEditor({
     setUploading(true);
     setError("");
     try {
-      const uploaded = await uploadImage(file, editToken);
+      const uploaded = await uploadImage(file);
       const selection = selectionRef.current;
       const insertion = insertImageMarkdown(
         markdown,
@@ -95,7 +93,6 @@ export function MarkdownEditor({
         method: "PUT",
         headers: {
           "Content-Type": "text/markdown; charset=utf-8",
-          "X-MDHub-Edit-Token": editToken,
         },
         body: markdown,
       });
@@ -103,9 +100,6 @@ export function MarkdownEditor({
         error?: string;
       };
       if (!response.ok) {
-        if (response.status === 401) {
-          sessionStorage.removeItem("mdhub-edit-token");
-        }
         throw new Error(result.error || `保存失败（HTTP ${response.status}）`);
       }
       onClose();

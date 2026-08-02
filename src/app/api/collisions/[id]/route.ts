@@ -1,6 +1,5 @@
 import { NextRequest } from "next/server";
 import { API_URL } from "@/lib/config";
-import { requireEditToken } from "@/lib/edit-auth";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -9,9 +8,6 @@ export async function POST(
   req: NextRequest,
   { params }: { params: Promise<{ id: string }> },
 ) {
-  const unauthorized = requireEditToken(req);
-  if (unauthorized) return unauthorized;
-
   const { id } = await params;
   if (!/^\d+$/.test(id)) {
     return Response.json({ error: "invalid collision id" }, { status: 400 });
@@ -24,7 +20,6 @@ export async function POST(
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          "X-MDHub-Edit-Token": process.env.MDHUB_EDIT_TOKEN || "",
         },
         body: await req.text(),
         cache: "no-store",

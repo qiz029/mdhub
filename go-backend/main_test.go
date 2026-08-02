@@ -189,50 +189,6 @@ func TestNormalizeNewComment(t *testing.T) {
 	}
 }
 
-func TestValidateIngressConfig(t *testing.T) {
-	tests := []struct {
-		name    string
-		address string
-		token   string
-		wantErr bool
-	}{
-		{name: "IPv4 loopback", address: "127.0.0.1:10002"},
-		{name: "IPv6 loopback", address: "[::1]:10002"},
-		{name: "localhost", address: "localhost:10002"},
-		{name: "public with token", address: ":10002", token: "secret"},
-		{name: "public without token", address: ":10002", wantErr: true},
-		{name: "specific public IP", address: "192.0.2.1:10002", wantErr: true},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			err := validateIngressConfig(tt.address, tt.token)
-			if (err != nil) != tt.wantErr {
-				t.Fatalf("error = %v, wantErr %v", err, tt.wantErr)
-			}
-		})
-	}
-}
-
-func TestEditAccessRequiresConfiguredToken(t *testing.T) {
-	previousToken, previousAddress := editToken, listenAddr
-	t.Cleanup(func() { editToken, listenAddr = previousToken, previousAddress })
-	request := httptest.NewRequest(http.MethodPut, "/api/documents/note", nil)
-
-	listenAddr, editToken = "127.0.0.1:10002", ""
-	if !hasEditAccess(request) {
-		t.Fatal("loopback compatibility access was rejected")
-	}
-	editToken = "secret"
-	if hasEditAccess(request) {
-		t.Fatal("missing configured token was accepted")
-	}
-	request.Header.Set("X-MDHub-Edit-Token", "secret")
-	if !hasEditAccess(request) {
-		t.Fatal("matching configured token was rejected")
-	}
-}
-
 func TestScanVaultFilesRecursive(t *testing.T) {
 	dir := t.TempDir()
 	old := vaultDir

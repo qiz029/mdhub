@@ -19,30 +19,30 @@ func expectDraftDocument(mock sqlmock.Sqlmock) {
 		}).AddRow("draft", "", "Draft", "secret draft", "secret", 12, false, "note", "user", "", time.Now()))
 }
 
-func TestGetDocumentHidesDraftWithoutEditAccess(t *testing.T) {
+func TestGetDocumentReturnsDraft(t *testing.T) {
 	mock := withMockDatabase(t)
-	previousToken, previousAddress := editToken, listenAddr
-	editToken, listenAddr = "secret", "127.0.0.1:10002"
-	t.Cleanup(func() { editToken, listenAddr = previousToken, previousAddress })
 	expectDraftDocument(mock)
+	mock.ExpectQuery("SELECT tag FROM document_tags").
+		WithArgs("draft").WillReturnRows(sqlmock.NewRows([]string{"tag"}))
+	mock.ExpectQuery("SELECT source_slug FROM backlinks").
+		WithArgs("draft").WillReturnRows(sqlmock.NewRows([]string{"source_slug"}))
 
+	// unpublished notes are readable like everything else; publish only
+	// curates feed/search/tree/Universe, it is not access control
 	request := httptest.NewRequest(http.MethodGet, "/api/documents/draft", nil)
 	response := httptest.NewRecorder()
 	getDocument(response, request, "draft")
 
-	if response.Code != http.StatusNotFound {
-		t.Fatalf("status = %d, want 404", response.Code)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", response.Code)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)
 	}
 }
 
-func TestGetDocumentReturnsFleetingDraftWithoutEditAccess(t *testing.T) {
+func TestGetDocumentReturnsFleetingDraft(t *testing.T) {
 	mock := withMockDatabase(t)
-	previousToken, previousAddress := editToken, listenAddr
-	editToken, listenAddr = "secret", "127.0.0.1:10002"
-	t.Cleanup(func() { editToken, listenAddr = previousToken, previousAddress })
 	mock.ExpectQuery("SELECT slug, file_path, title, raw_content").
 		WithArgs("_sparks/1").
 		WillReturnRows(sqlmock.NewRows([]string{
@@ -54,7 +54,6 @@ func TestGetDocumentReturnsFleetingDraftWithoutEditAccess(t *testing.T) {
 	mock.ExpectQuery("SELECT source_slug FROM backlinks").
 		WithArgs("_sparks/1").WillReturnRows(sqlmock.NewRows([]string{"source_slug"}))
 
-	// no edit token: sparks are publicly readable even when unpublished
 	request := httptest.NewRequest(http.MethodGet, "/api/documents/_sparks/1", nil)
 	response := httptest.NewRecorder()
 	getDocument(response, request, "_sparks/1")
@@ -67,33 +66,8 @@ func TestGetDocumentReturnsFleetingDraftWithoutEditAccess(t *testing.T) {
 	}
 }
 
-func TestGetDocumentReturnsDraftWithEditAccess(t *testing.T) {
-	mock := withMockDatabase(t)
-	previousToken, previousAddress := editToken, listenAddr
-	editToken, listenAddr = "secret", "127.0.0.1:10002"
-	t.Cleanup(func() { editToken, listenAddr = previousToken, previousAddress })
-	expectDraftDocument(mock)
-	mock.ExpectQuery("SELECT tag FROM document_tags").
-		WithArgs("draft").WillReturnRows(sqlmock.NewRows([]string{"tag"}))
-	mock.ExpectQuery("SELECT source_slug FROM backlinks").
-		WithArgs("draft").WillReturnRows(sqlmock.NewRows([]string{"source_slug"}))
-
-	request := httptest.NewRequest(http.MethodGet, "/api/documents/draft", nil)
-	request.Header.Set("X-MDHub-Edit-Token", "secret")
-	response := httptest.NewRecorder()
-	getDocument(response, request, "draft")
-
-	if response.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200", response.Code)
-	}
-	if err := mock.ExpectationsWereMet(); err != nil {
-		t.Fatal(err)
-	}
-}
-
 func TestHandleDocumentPublishesNestedSlugThroughPublicationModule(t *testing.T) {
 	mock := withMockDatabase(t)
-	isolateEditAccess(t)
 	isolatePublicationState(t)
 	slug := "folder/note"
 	mock.ExpectQuery("SELECT file_path FROM documents").
@@ -105,7 +79,6 @@ func TestHandleDocumentPublishesNestedSlugThroughPublicationModule(t *testing.T)
 		"/api/documents/"+slug,
 		strings.NewReader("---\ntitle: Fresh\npublish: true\n---\nFresh body"),
 	)
-	request.Header.Set("X-MDHub-Edit-Token", "secret")
 	response := httptest.NewRecorder()
 
 	handleDocument(response, request)
@@ -126,7 +99,6 @@ func TestHandleDocumentPublishesNestedSlugThroughPublicationModule(t *testing.T)
 
 func TestHandleDocumentDeletesRuntimeProjections(t *testing.T) {
 	mock := withMockDatabase(t)
-	isolateEditAccess(t)
 	isolatePublicationState(t)
 	slug := "folder/note"
 	searchIndex[slug] = &searchEntry{title: "Old"}
@@ -135,7 +107,6 @@ func TestHandleDocumentDeletesRuntimeProjections(t *testing.T) {
 		WithArgs(slug).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	request := httptest.NewRequest(http.MethodDelete, "/api/documents/"+slug, nil)
-	request.Header.Set("X-MDHub-Edit-Token", "secret")
 	response := httptest.NewRecorder()
 
 	handleDocument(response, request)
@@ -152,18 +123,5 @@ func TestHandleDocumentDeletesRuntimeProjections(t *testing.T) {
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)
-	}
-}
-
-func TestHandleDocumentRejectsMutationWithoutEditAccess(t *testing.T) {
-	withMockDatabase(t)
-	isolateEditAccess(t)
-	request := httptest.NewRequest(http.MethodPut, "/api/documents/note", strings.NewReader("body"))
-	response := httptest.NewRecorder()
-
-	handleDocument(response, request)
-
-	if response.Code != http.StatusUnauthorized {
-		t.Fatalf("status = %d, want 401", response.Code)
 	}
 }

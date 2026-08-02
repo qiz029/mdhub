@@ -17,7 +17,7 @@ export default function SparksPage() {
             Sparks
           </h1>
           <p className="mt-2 max-w-2xl text-sm leading-6 text-stone-500">
-            碎片 → 碰撞 → 灵感 → 长成。捕获和策展需要编辑令牌。
+            碎片 → 碰撞 → 灵感 → 长成。
           </p>
         </div>
         <div className="space-y-10">

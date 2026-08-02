@@ -107,14 +107,12 @@ func TestHandleReembedRequiresPostAndQueuesPublishedDocuments(t *testing.T) {
 
 	t.Run("published documents", func(t *testing.T) {
 		mock := withMockDatabase(t)
-		isolateEditAccess(t)
 		oldURL := embedBaseURL
 		embedBaseURL = ""
 		t.Cleanup(func() { embedBaseURL = oldURL })
 		mock.ExpectQuery("SELECT slug FROM documents WHERE published=true").
 			WillReturnRows(sqlmock.NewRows([]string{"slug"}).AddRow("a").AddRow("b"))
 		request := httptest.NewRequest(http.MethodPost, "/api/reembed", strings.NewReader(""))
-		request.Header.Set("X-MDHub-Edit-Token", "secret")
 		response := httptest.NewRecorder()
 
 		handleReembed(response, request)

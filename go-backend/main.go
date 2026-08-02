@@ -5,7 +5,6 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
-	"crypto/subtle"
 	"database/sql"
 	"encoding/binary"
 	"encoding/json"
@@ -20,7 +19,6 @@ import (
 	"io"
 	"io/fs"
 	"log"
-	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -72,7 +70,6 @@ var (
 	vaultDir   string // only used by the one-shot `-import` command
 	pgDSN      = getEnv("MDHUB_PG", "postgres://mdhub:mdhub@localhost:5432/mdhub?sslmode=disable")
 	listenAddr = getEnv("MDHUB_LISTEN", "127.0.0.1:10002")
-	editToken  = getEnv("MDHUB_EDIT_TOKEN", "")
 	db         *sql.DB
 	mu         sync.RWMutex
 )
@@ -136,11 +133,6 @@ func main() {
 	var err error
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
 	log.Println("starting mdhub-go")
-	if *importDir == "" {
-		if err := validateIngressConfig(listenAddr, editToken); err != nil {
-			log.Fatal(err)
-		}
-	}
 	db, err = sql.Open("postgres", pgDSN)
 	if err != nil {
 		log.Fatal("pg open:", err)
@@ -681,14 +673,8 @@ func handleDocument(w http.ResponseWriter, r *http.Request) {
 	case http.MethodGet:
 		getDocument(w, r, slug)
 	case http.MethodPut:
-		if !requireEditAccess(w, r) {
-			return
-		}
 		putDocument(w, r, slug)
 	case http.MethodDelete:
-		if !requireEditAccess(w, r) {
-			return
-		}
 		deleteDocument(w, r, slug)
 	default:
 		httpError(w, fmt.Errorf("method not allowed"), 405)
@@ -721,12 +707,6 @@ func getDocument(w http.ResponseWriter, r *http.Request, slug string) {
 			&d.WordCount, &d.Published, &d.Kind, &d.Source, &d.CategoryPath, &mtime)
 	if err != nil {
 		httpError(w, fmt.Errorf("not found"), 404)
-		return
-	}
-	// sparks are publicly readable (see collide.go); unpublished notes stay
-	// hidden behind the edit token
-	if !d.Published && d.Kind != "fleeting" && !hasEditAccess(r) {
-		httpError(w, fmt.Errorf("not found"), http.StatusNotFound)
 		return
 	}
 	d.Updated = mtime.UnixMilli()
@@ -889,50 +869,6 @@ func isContentAddressedUploadPath(key string, data []byte, mime string) bool {
 	return key == uploadedImagePath(data, mime)
 }
 
-func editTokenValid(r *http.Request) bool {
-	providedHash := sha256.Sum256([]byte(r.Header.Get("X-MDHub-Edit-Token")))
-	expectedHash := sha256.Sum256([]byte(editToken))
-	return editToken != "" && subtle.ConstantTimeCompare(providedHash[:], expectedHash[:]) == 1
-}
-
-func isLoopbackListenAddress(address string) bool {
-	host, _, err := net.SplitHostPort(address)
-	if err != nil {
-		return false
-	}
-	if strings.EqualFold(host, "localhost") {
-		return true
-	}
-	ip := net.ParseIP(host)
-	return ip != nil && ip.IsLoopback()
-}
-
-func validateIngressConfig(address, token string) error {
-	if !isLoopbackListenAddress(address) && token == "" {
-		return fmt.Errorf("MDHUB_EDIT_TOKEN is required when MDHUB_LISTEN is not loopback")
-	}
-	return nil
-}
-
-func hasEditAccess(r *http.Request) bool {
-	if editToken == "" {
-		return isLoopbackListenAddress(listenAddr)
-	}
-	return editTokenValid(r)
-}
-
-func requireEditAccess(w http.ResponseWriter, r *http.Request) bool {
-	if hasEditAccess(r) {
-		return true
-	}
-	if editToken == "" {
-		httpError(w, fmt.Errorf("editing disabled; configure MDHUB_EDIT_TOKEN"), http.StatusServiceUnavailable)
-		return false
-	}
-	httpError(w, fmt.Errorf("invalid edit token"), http.StatusUnauthorized)
-	return false
-}
-
 func handleImage(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
@@ -970,15 +906,6 @@ func getImage(w http.ResponseWriter, r *http.Request) {
 }
 
 func uploadImage(w http.ResponseWriter, r *http.Request) {
-	if editToken == "" {
-		httpError(w, fmt.Errorf("image uploads disabled; configure MDHUB_EDIT_TOKEN"), http.StatusServiceUnavailable)
-		return
-	}
-	if !editTokenValid(r) {
-		httpError(w, fmt.Errorf("invalid edit token"), http.StatusUnauthorized)
-		return
-	}
-
 	upload, code, err := parseImageUpload(w, r)
 	if err != nil {
 		httpError(w, err, code)
@@ -1212,9 +1139,8 @@ func getComments(w http.ResponseWriter, r *http.Request, slug string) {
 		SELECT t.id, t.quote, t.prefix, t.suffix, e.author, e.text, e.created_at
 		FROM comment_threads t
 		JOIN comment_entries e ON e.thread_id = t.id
-		JOIN documents d ON d.slug = t.slug
-		WHERE t.slug=$1 AND (d.published OR $2)
-		ORDER BY t.created_at, e.id`, slug, hasEditAccess(r))
+		WHERE t.slug=$1
+		ORDER BY t.created_at, e.id`, slug)
 	if err != nil {
 		httpError(w, err, 500)
 		return
@@ -1410,9 +1336,6 @@ func handleReindex(w http.ResponseWriter, r *http.Request) {
 		httpError(w, fmt.Errorf("method not allowed"), http.StatusMethodNotAllowed)
 		return
 	}
-	if !requireEditAccess(w, r) {
-		return
-	}
 	loadIndexFromDB()
 	loadEmbeddingsFromDB()
 	writeJSON(w, map[string]string{"status": "ok"})
@@ -1423,9 +1346,6 @@ func handleReindex(w http.ResponseWriter, r *http.Request) {
 func handleReclassify(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		httpError(w, fmt.Errorf("method not allowed"), 405)
-		return
-	}
-	if !requireEditAccess(w, r) {
 		return
 	}
 	rows, err := db.Query(

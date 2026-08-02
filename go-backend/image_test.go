@@ -188,27 +188,6 @@ func TestReservedUploadPath(t *testing.T) {
 	}
 }
 
-func TestEditTokenValid(t *testing.T) {
-	original := editToken
-	t.Cleanup(func() { editToken = original })
-
-	request := httptest.NewRequest(http.MethodPost, "/api/images", nil)
-	editToken = ""
-	if editTokenValid(request) {
-		t.Fatal("empty configured token was accepted")
-	}
-
-	editToken = "correct horse battery staple"
-	request.Header.Set("X-MDHub-Edit-Token", "wrong")
-	if editTokenValid(request) {
-		t.Fatal("wrong token was accepted")
-	}
-	request.Header.Set("X-MDHub-Edit-Token", editToken)
-	if !editTokenValid(request) {
-		t.Fatal("matching token was rejected")
-	}
-}
-
 type endlessZeroReader struct{}
 
 func (endlessZeroReader) Read(p []byte) (int, error) {

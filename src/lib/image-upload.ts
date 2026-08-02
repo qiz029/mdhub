@@ -98,25 +98,18 @@ export async function optimizeImage(file: File): Promise<File> {
   }
 }
 
-export async function uploadImage(
-  file: File,
-  editToken: string,
-): Promise<UploadedImage> {
+export async function uploadImage(file: File): Promise<UploadedImage> {
   const optimized = await optimizeImage(file);
   const body = new FormData();
   body.set("file", optimized, optimized.name);
   const response = await fetch("/mdhub/api/image", {
     method: "POST",
-    headers: { "X-MDHub-Edit-Token": editToken },
     body,
   });
   const result = (await response.json().catch(() => ({}))) as Partial<
     UploadedImage & { error: string }
   >;
   if (!response.ok || !result.href) {
-    if (response.status === 401) {
-      sessionStorage.removeItem("mdhub-edit-token");
-    }
     throw new Error(result.error || `图片上传失败（HTTP ${response.status}）`);
   }
   return result as UploadedImage;

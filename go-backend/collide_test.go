@@ -309,7 +309,6 @@ func TestDoEmbedChainsIntoCollisionQueue(t *testing.T) {
 
 func TestHandleSparksServesAnonymousGet(t *testing.T) {
 	mock := withMockDatabase(t)
-	isolateEditAccess(t)
 	mock.ExpectQuery("FROM documents").
 		WillReturnRows(sqlmock.NewRows([]string{"slug", "title", "excerpt", "file_mtime", "source", "collisions"}).
 			AddRow("_sparks/1", "Spark", "idea", time.Unix(100, 0), "rss/Test Feed", 3))
@@ -342,7 +341,6 @@ func TestHandleCollisionsPublicRead(t *testing.T) {
 
 	t.Run("anonymous sees every collision", func(t *testing.T) {
 		mock := withMockDatabase(t)
-		isolateEditAccess(t)
 		mock.ExpectQuery("FROM collisions").
 			WithArgs("").
 			WillReturnRows(sqlmock.NewRows(columns).AddRow(row...))
@@ -363,7 +361,6 @@ func TestHandleCollisionsPublicRead(t *testing.T) {
 
 	t.Run("slug filter", func(t *testing.T) {
 		mock := withMockDatabase(t)
-		isolateEditAccess(t)
 		mock.ExpectQuery("FROM collisions").
 			WithArgs("a").
 			WillReturnRows(sqlmock.NewRows(columns).AddRow(row...))
@@ -382,10 +379,8 @@ func TestHandleCollisionsPublicRead(t *testing.T) {
 func TestHandleCollisionVerdict(t *testing.T) {
 	t.Run("invalid verdict is rejected", func(t *testing.T) {
 		withMockDatabase(t)
-		isolateEditAccess(t)
 		request := httptest.NewRequest(http.MethodPost, "/api/collisions/7",
 			strings.NewReader(`{"verdict":"bogus"}`))
-		request.Header.Set("X-MDHub-Edit-Token", "secret")
 		response := httptest.NewRecorder()
 		handleCollision(response, request)
 		if response.Code != http.StatusBadRequest {
@@ -395,13 +390,11 @@ func TestHandleCollisionVerdict(t *testing.T) {
 
 	t.Run("valid verdict updates", func(t *testing.T) {
 		mock := withMockDatabase(t)
-		isolateEditAccess(t)
 		mock.ExpectExec(regexp.QuoteMeta("UPDATE collisions SET verdict=$1 WHERE id=$2")).
 			WithArgs("confirmed", "7").
 			WillReturnResult(sqlmock.NewResult(0, 1))
 		request := httptest.NewRequest(http.MethodPost, "/api/collisions/7",
 			strings.NewReader(`{"verdict":"confirmed"}`))
-		request.Header.Set("X-MDHub-Edit-Token", "secret")
 		response := httptest.NewRecorder()
 		handleCollision(response, request)
 		if response.Code != http.StatusOK {
@@ -414,13 +407,11 @@ func TestHandleCollisionVerdict(t *testing.T) {
 
 	t.Run("unknown id is 404", func(t *testing.T) {
 		mock := withMockDatabase(t)
-		isolateEditAccess(t)
 		mock.ExpectExec("UPDATE collisions").
 			WithArgs("dismissed", "99").
 			WillReturnResult(sqlmock.NewResult(0, 0))
 		request := httptest.NewRequest(http.MethodPost, "/api/collisions/99",
 			strings.NewReader(`{"verdict":"dismissed"}`))
-		request.Header.Set("X-MDHub-Edit-Token", "secret")
 		response := httptest.NewRecorder()
 		handleCollision(response, request)
 		if response.Code != http.StatusNotFound {
@@ -430,29 +421,15 @@ func TestHandleCollisionVerdict(t *testing.T) {
 			t.Fatal(err)
 		}
 	})
-
-	t.Run("edit token required", func(t *testing.T) {
-		withMockDatabase(t)
-		isolateEditAccess(t)
-		request := httptest.NewRequest(http.MethodPost, "/api/collisions/7",
-			strings.NewReader(`{"verdict":"confirmed"}`))
-		response := httptest.NewRecorder()
-		handleCollision(response, request)
-		if response.Code != http.StatusUnauthorized {
-			t.Fatalf("status = %d, want 401", response.Code)
-		}
-	})
 }
 
 func TestHandleRecollideQueuesEveryEmbeddedSlug(t *testing.T) {
 	withMockDatabase(t)
 	isolatePublicationState(t)
-	isolateEditAccess(t)
 	embedIndex["a"] = []float32{1}
 	embedIndex["b"] = []float32{0, 1}
 
 	request := httptest.NewRequest(http.MethodPost, "/api/recollide", strings.NewReader(""))
-	request.Header.Set("X-MDHub-Edit-Token", "secret")
 	response := httptest.NewRecorder()
 	handleRecollide(response, request)
 
@@ -467,26 +444,22 @@ func TestHandleRecollideQueuesEveryEmbeddedSlug(t *testing.T) {
 	}
 }
 
-func answerRequest(t *testing.T, path, body string, withToken bool) (*httptest.ResponseRecorder, *http.Request) {
+func answerRequest(t *testing.T, path, body string) (*httptest.ResponseRecorder, *http.Request) {
 	t.Helper()
 	request := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
-	if withToken {
-		request.Header.Set("X-MDHub-Edit-Token", "secret")
-	}
 	return httptest.NewRecorder(), request
 }
 
 func TestHandleCollisionAnswer(t *testing.T) {
 	t.Run("claims the bounty", func(t *testing.T) {
 		mock := withMockDatabase(t)
-		isolateEditAccess(t)
 		mock.ExpectQuery(regexp.QuoteMeta("SELECT EXISTS(SELECT 1 FROM documents WHERE slug=$1)")).
 			WithArgs("notes/answer").
 			WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(true))
 		mock.ExpectExec(regexp.QuoteMeta("UPDATE collisions SET answered_by=$1, answered_at=now() WHERE id=$2")).
 			WithArgs("notes/answer", "7").
 			WillReturnResult(sqlmock.NewResult(0, 1))
-		response, request := answerRequest(t, "/api/collisions/7/answer", `{"slug":"notes/answer"}`, true)
+		response, request := answerRequest(t, "/api/collisions/7/answer", `{"slug":"notes/answer"}`)
 
 		handleCollision(response, request)
 
@@ -500,7 +473,6 @@ func TestHandleCollisionAnswer(t *testing.T) {
 
 	t.Run("re-answering overwrites the previous claim", func(t *testing.T) {
 		mock := withMockDatabase(t)
-		isolateEditAccess(t)
 		for _, slug := range []string{"notes/first", "notes/second"} {
 			mock.ExpectQuery("SELECT EXISTS").
 				WithArgs(slug).
@@ -510,7 +482,7 @@ func TestHandleCollisionAnswer(t *testing.T) {
 				WillReturnResult(sqlmock.NewResult(0, 1))
 		}
 		for _, slug := range []string{"notes/first", "notes/second"} {
-			response, request := answerRequest(t, "/api/collisions/7/answer", `{"slug":"`+slug+`"}`, true)
+			response, request := answerRequest(t, "/api/collisions/7/answer", `{"slug":"`+slug+`"}`)
 			handleCollision(response, request)
 			if response.Code != http.StatusOK {
 				t.Fatalf("slug %s: status = %d, body = %q", slug, response.Code, response.Body.String())
@@ -523,11 +495,10 @@ func TestHandleCollisionAnswer(t *testing.T) {
 
 	t.Run("unknown slug is 400", func(t *testing.T) {
 		mock := withMockDatabase(t)
-		isolateEditAccess(t)
 		mock.ExpectQuery("SELECT EXISTS").
 			WithArgs("notes/ghost").
 			WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(false))
-		response, request := answerRequest(t, "/api/collisions/7/answer", `{"slug":"notes/ghost"}`, true)
+		response, request := answerRequest(t, "/api/collisions/7/answer", `{"slug":"notes/ghost"}`)
 
 		handleCollision(response, request)
 
@@ -541,8 +512,7 @@ func TestHandleCollisionAnswer(t *testing.T) {
 
 	t.Run("empty slug is 400", func(t *testing.T) {
 		withMockDatabase(t)
-		isolateEditAccess(t)
-		response, request := answerRequest(t, "/api/collisions/7/answer", `{"slug":"  "}`, true)
+		response, request := answerRequest(t, "/api/collisions/7/answer", `{"slug":"  "}`)
 		handleCollision(response, request)
 		if response.Code != http.StatusBadRequest {
 			t.Fatalf("status = %d, want 400", response.Code)
@@ -551,8 +521,7 @@ func TestHandleCollisionAnswer(t *testing.T) {
 
 	t.Run("invalid body is 400", func(t *testing.T) {
 		withMockDatabase(t)
-		isolateEditAccess(t)
-		response, request := answerRequest(t, "/api/collisions/7/answer", `not json`, true)
+		response, request := answerRequest(t, "/api/collisions/7/answer", `not json`)
 		handleCollision(response, request)
 		if response.Code != http.StatusBadRequest {
 			t.Fatalf("status = %d, want 400", response.Code)
@@ -561,14 +530,13 @@ func TestHandleCollisionAnswer(t *testing.T) {
 
 	t.Run("unknown collision id is 404", func(t *testing.T) {
 		mock := withMockDatabase(t)
-		isolateEditAccess(t)
 		mock.ExpectQuery("SELECT EXISTS").
 			WithArgs("notes/answer").
 			WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(true))
 		mock.ExpectExec("UPDATE collisions SET answered_by").
 			WithArgs("notes/answer", "99").
 			WillReturnResult(sqlmock.NewResult(0, 0))
-		response, request := answerRequest(t, "/api/collisions/99/answer", `{"slug":"notes/answer"}`, true)
+		response, request := answerRequest(t, "/api/collisions/99/answer", `{"slug":"notes/answer"}`)
 
 		handleCollision(response, request)
 
@@ -580,19 +548,8 @@ func TestHandleCollisionAnswer(t *testing.T) {
 		}
 	})
 
-	t.Run("edit token required", func(t *testing.T) {
-		withMockDatabase(t)
-		isolateEditAccess(t)
-		response, request := answerRequest(t, "/api/collisions/7/answer", `{"slug":"notes/answer"}`, false)
-		handleCollision(response, request)
-		if response.Code != http.StatusUnauthorized {
-			t.Fatalf("status = %d, want 401", response.Code)
-		}
-	})
-
 	t.Run("GET is not allowed", func(t *testing.T) {
 		withMockDatabase(t)
-		isolateEditAccess(t)
 		request := httptest.NewRequest(http.MethodGet, "/api/collisions/7/answer", nil)
 		response := httptest.NewRecorder()
 		handleCollision(response, request)
