@@ -55,6 +55,14 @@ type UniverseCanvasProps = {
   onSelect(id: string | null): void;
 };
 
+// Signal pulses ease in: they linger near the source as if charging, then
+// fire across the edge. Position uses progress^3; brightness ramps with the
+// velocity (~progress^2) so the slow phase reads as a dim charge gathering
+// at the node rather than a static dot.
+function easeInCubic(t: number): number {
+  return t * t * t;
+}
+
 const clusterColors = [
   "#c15f3c",
   "#55766a",
@@ -282,7 +290,8 @@ export const UniverseCanvas = forwardRef<
       context.stroke();
 
       const clusterSeed = hashString(`${edge.sourceCluster}:${edge.targetCluster}`);
-      const clusterT = (now * 0.07 + (clusterSeed % 1000) / 1000) % 1;
+      const clusterRaw = (now * 0.07 + (clusterSeed % 1000) / 1000) % 1;
+      const clusterT = easeInCubic(clusterRaw);
       const invT = 1 - clusterT;
       const pulseX =
         invT * invT * source.x +
@@ -295,7 +304,7 @@ export const UniverseCanvas = forwardRef<
       context.beginPath();
       context.arc(pulseX, pulseY, 2.2 / transform.k, 0, Math.PI * 2);
       context.fillStyle = clusterColor(edge.sourceCluster);
-      context.globalAlpha = 0.55;
+      context.globalAlpha = 0.12 + 0.5 * clusterRaw * clusterRaw;
       context.fill();
     }
     context.setLineDash([]);
@@ -331,19 +340,21 @@ export const UniverseCanvas = forwardRef<
       const speed = (0.1 + strength * 0.2) * (emphasized ? 1.8 : 1);
       for (let pulse = 0; pulse < pulseCount; pulse++) {
         const raw = (now * speed + (seed % 1000) / 1000 + pulse * 0.5) % 1;
-        const progress = seed % 2 === 0 ? raw : 1 - raw;
+        const eased = easeInCubic(raw);
+        const progress = seed % 2 === 0 ? eased : 1 - eased;
+        const charge = 0.25 + 0.75 * raw * raw;
         const x = source.x + (target.x - source.x) * progress;
         const y = source.y + (target.y - source.y) * progress;
         const radius = (emphasized ? 2.6 : 1.8) / transform.k;
         context.beginPath();
         context.arc(x, y, radius * 2.6, 0, Math.PI * 2);
         context.fillStyle = emphasized ? universeNodeColor(source) : foreground;
-        context.globalAlpha = emphasized ? 0.16 : 0.08;
+        context.globalAlpha = (emphasized ? 0.16 : 0.08) * charge;
         context.fill();
         context.beginPath();
         context.arc(x, y, radius, 0, Math.PI * 2);
         context.fillStyle = emphasized ? universeNodeColor(source) : foreground;
-        context.globalAlpha = emphasized ? 0.95 : 0.4;
+        context.globalAlpha = (emphasized ? 0.95 : 0.4) * charge;
         context.fill();
       }
     }
