@@ -18,13 +18,16 @@ import {
   bountyAgeLabel,
   isOpenBounty,
 } from "@/lib/play";
+import { paginate } from "@/lib/paginate";
+import { GrowthChart } from "@/components/GrowthChart";
 
 const TOKEN_KEY = "mdhub-edit-token";
+const PAGE_SIZE = 10;
 
 // Reads are public (personal space; auth is handled at the edge). The edit
-// token is only needed for writes — capture and verdicts — and is fetched
-// lazily: use the cached token or prompt, and on a 401 drop the cached token
-// and prompt once more before giving up.
+// token is only needed for writes — capture, verdicts, bounty claims — and
+// is fetched lazily: use the cached token or prompt, and on a 401 drop the
+// cached token and prompt once more before giving up.
 async function fetchWithEditToken(
   input: string,
   init: RequestInit,
@@ -121,7 +124,77 @@ function CollisionCard({
   );
 }
 
+type SparkTab = "bounties" | "collisions" | "sparks" | "growth";
+
+const SPARK_TABS: { id: SparkTab; label: string }[] = [
+  { id: "bounties", label: "悬赏" },
+  { id: "collisions", label: "碰撞流" },
+  { id: "sparks", label: "灵感流" },
+  { id: "growth", label: "成长" },
+];
+
+function tabFromHash(hash: string): SparkTab {
+  const id = hash.replace(/^#/, "");
+  return SPARK_TABS.some((tab) => tab.id === id)
+    ? (id as SparkTab)
+    : "bounties";
+}
+
+// Same visual language as the main Nav tabs.
+function tabClass(active: boolean): string {
+  return `relative inline-flex min-h-9 items-center gap-1.5 px-1 text-sm font-medium transition-colors ${
+    active
+      ? "text-stone-900 after:absolute after:inset-x-1 after:-bottom-px after:h-0.5 after:rounded-full after:bg-[var(--accent)]"
+      : "text-stone-400 hover:text-stone-700"
+  }`;
+}
+
+function CountBadge({ count }: { count: number }) {
+  if (count === 0) return null;
+  return (
+    <span className="rounded-full bg-stone-100 px-1.5 py-0.5 text-xs tabular-nums text-stone-500">
+      {count}
+    </span>
+  );
+}
+
+function Pagination({
+  page,
+  pageCount,
+  onPage,
+}: {
+  page: number;
+  pageCount: number;
+  onPage: (page: number) => void;
+}) {
+  if (pageCount <= 1) return null;
+  return (
+    <div className="mt-4 flex items-center justify-center gap-3 text-xs text-stone-500">
+      <button
+        type="button"
+        onClick={() => onPage(page - 1)}
+        disabled={page <= 1}
+        className="rounded-md border border-stone-300 bg-white px-2.5 py-1 font-medium text-stone-700 hover:bg-stone-50 disabled:opacity-40"
+      >
+        上一页
+      </button>
+      <span className="tabular-nums">
+        第 {page} / {pageCount} 页
+      </span>
+      <button
+        type="button"
+        onClick={() => onPage(page + 1)}
+        disabled={page >= pageCount}
+        className="rounded-md border border-stone-300 bg-white px-2.5 py-1 font-medium text-stone-700 hover:bg-stone-50 disabled:opacity-40"
+      >
+        下一页
+      </button>
+    </div>
+  );
+}
+
 export function SparksClient() {
+  const [tab, setTab] = useState<SparkTab>("bounties");
   const [sparks, setSparks] = useState<Spark[]>([]);
   const [collisions, setCollisions] = useState<Collision[]>([]);
   const [loading, setLoading] = useState(true);
@@ -133,6 +206,21 @@ export function SparksClient() {
   const [claimDraft, setClaimDraft] = useState("");
   const [claiming, setClaiming] = useState(false);
   const [showAnswered, setShowAnswered] = useState(false);
+  const [collisionPage, setCollisionPage] = useState(1);
+  const [sparkPage, setSparkPage] = useState(1);
+
+  // Keep the active tab in the URL hash so a refresh lands back on it.
+  useEffect(() => {
+    setTab(tabFromHash(window.location.hash));
+    const onHashChange = () => setTab(tabFromHash(window.location.hash));
+    window.addEventListener("hashchange", onHashChange);
+    return () => window.removeEventListener("hashchange", onHashChange);
+  }, []);
+
+  function selectTab(id: SparkTab) {
+    setTab(id);
+    window.history.replaceState(null, "", `#${id}`);
+  }
 
   useEffect(() => {
     let cancelled = false;
@@ -285,9 +373,17 @@ export function SparksClient() {
   const dismissedCollisions = collisions.filter(
     (c) => c.verdict === "dismissed",
   );
+  const collisionPageData = paginate(activeCollisions, collisionPage, PAGE_SIZE);
+  const sparkPageData = paginate(sparks, sparkPage, PAGE_SIZE);
+
+  const tabCounts: Partial<Record<SparkTab, number>> = {
+    bounties: openBounties.length,
+    collisions: activeCollisions.length,
+    sparks: sparks.length,
+  };
 
   return (
-    <div className="space-y-10">
+    <div className="space-y-8">
       {error && (
         <p className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
           {error}
@@ -323,227 +419,262 @@ export function SparksClient() {
         </div>
       </section>
 
-      <section aria-labelledby="bounty-title">
-        <h2 id="bounty-title" className="text-sm font-semibold text-stone-800">
-          悬赏
-        </h2>
-        {loading ? (
-          <p className="mt-3 text-sm text-stone-400">加载中…</p>
-        ) : openBounties.length === 0 ? (
-          <p className="mt-3 text-sm text-stone-400">
-            没有开放悬赏。碰撞产出的开放问题会挂在这里等你认领。
-          </p>
-        ) : (
-          <ul className="mt-3 space-y-3">
-            {openBounties.map((bounty) => (
-              <li
-                key={bounty.id}
-                className="rounded-xl border border-stone-200 bg-white p-4"
-              >
-                <p className="text-sm font-medium leading-6 text-stone-800">
-                  {bounty.question}
+      <div>
+        <div
+          role="tablist"
+          aria-label="Sparks 板块"
+          className="flex items-center gap-4 border-b border-stone-200"
+        >
+          {SPARK_TABS.map((sparkTab) => (
+            <button
+              key={sparkTab.id}
+              type="button"
+              role="tab"
+              aria-selected={tab === sparkTab.id}
+              onClick={() => selectTab(sparkTab.id)}
+              className={tabClass(tab === sparkTab.id)}
+            >
+              {sparkTab.label}
+              {tabCounts[sparkTab.id] !== undefined && (
+                <CountBadge count={tabCounts[sparkTab.id]!} />
+              )}
+            </button>
+          ))}
+        </div>
+
+        <div className="mt-6">
+          {tab === "bounties" && (
+            <section aria-label="悬赏">
+              {loading ? (
+                <p className="text-sm text-stone-400">加载中…</p>
+              ) : openBounties.length === 0 ? (
+                <p className="text-sm text-stone-400">
+                  没有开放悬赏。碰撞产出的开放问题会挂在这里等你认领。
                 </p>
-                <div className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-sm">
-                  <Link
-                    href={viewHref(bounty.slug_a)}
-                    className="text-stone-600 hover:underline"
-                  >
-                    {bounty.title_a}
-                  </Link>
-                  <span className="text-stone-400">↔</span>
-                  <Link
-                    href={viewHref(bounty.slug_b)}
-                    className="text-stone-600 hover:underline"
-                  >
-                    {bounty.title_b}
-                  </Link>
-                  <span className="ml-auto rounded-full bg-amber-100 px-2 py-0.5 text-xs text-amber-700">
-                    {bountyAgeLabel(bounty.created_at, nowMs)}
-                  </span>
-                </div>
-                {claimingId === bounty.id ? (
-                  <div className="mt-3">
-                    <textarea
-                      value={claimDraft}
-                      onChange={(event) => setClaimDraft(event.target.value)}
-                      rows={4}
-                      placeholder="写下你的回答（会保存为一篇正式笔记）…"
-                      className="w-full rounded-xl border border-stone-300 bg-white px-3 py-2.5 text-sm leading-6 text-stone-800 placeholder:text-stone-400 focus:border-stone-500 focus:outline-none"
-                    />
-                    <div className="mt-2 flex items-center gap-2">
-                      <button
-                        type="button"
-                        onClick={() => submitClaim(bounty)}
-                        disabled={claiming}
-                        className="rounded-md bg-stone-900 px-3 py-1.5 text-xs font-medium text-white hover:opacity-85 disabled:opacity-40"
-                      >
-                        {claiming ? "提交中…" : "提交回答"}
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setClaimingId(null);
-                          setClaimDraft("");
-                        }}
-                        disabled={claiming}
-                        className="rounded-md border border-stone-300 bg-white px-3 py-1.5 text-xs font-medium text-stone-700 hover:bg-stone-50 disabled:opacity-40"
-                      >
-                        取消
-                      </button>
-                    </div>
-                  </div>
-                ) : (
+              ) : (
+                <ul className="space-y-3">
+                  {openBounties.map((bounty) => (
+                    <li
+                      key={bounty.id}
+                      className="rounded-xl border border-stone-200 bg-white p-4"
+                    >
+                      <p className="text-sm font-medium leading-6 text-stone-800">
+                        {bounty.question}
+                      </p>
+                      <div className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-sm">
+                        <Link
+                          href={viewHref(bounty.slug_a)}
+                          className="text-stone-600 hover:underline"
+                        >
+                          {bounty.title_a}
+                        </Link>
+                        <span className="text-stone-400">↔</span>
+                        <Link
+                          href={viewHref(bounty.slug_b)}
+                          className="text-stone-600 hover:underline"
+                        >
+                          {bounty.title_b}
+                        </Link>
+                        <span className="ml-auto rounded-full bg-amber-100 px-2 py-0.5 text-xs text-amber-700">
+                          {bountyAgeLabel(bounty.created_at, nowMs)}
+                        </span>
+                      </div>
+                      {claimingId === bounty.id ? (
+                        <div className="mt-3">
+                          <textarea
+                            value={claimDraft}
+                            onChange={(event) =>
+                              setClaimDraft(event.target.value)
+                            }
+                            rows={4}
+                            placeholder="写下你的回答（会保存为一篇正式笔记）…"
+                            className="w-full rounded-xl border border-stone-300 bg-white px-3 py-2.5 text-sm leading-6 text-stone-800 placeholder:text-stone-400 focus:border-stone-500 focus:outline-none"
+                          />
+                          <div className="mt-2 flex items-center gap-2">
+                            <button
+                              type="button"
+                              onClick={() => submitClaim(bounty)}
+                              disabled={claiming}
+                              className="rounded-md bg-stone-900 px-3 py-1.5 text-xs font-medium text-white hover:opacity-85 disabled:opacity-40"
+                            >
+                              {claiming ? "提交中…" : "提交回答"}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setClaimingId(null);
+                                setClaimDraft("");
+                              }}
+                              disabled={claiming}
+                              className="rounded-md border border-stone-300 bg-white px-3 py-1.5 text-xs font-medium text-stone-700 hover:bg-stone-50 disabled:opacity-40"
+                            >
+                              取消
+                            </button>
+                          </div>
+                        </div>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setClaimingId(bounty.id);
+                            setClaimDraft("");
+                          }}
+                          className="mt-3 rounded-md border border-stone-300 bg-white px-3 py-1.5 text-xs font-medium text-stone-700 hover:bg-stone-50"
+                        >
+                          认领
+                        </button>
+                      )}
+                    </li>
+                  ))}
+                </ul>
+              )}
+              {answeredBounties.length > 0 && (
+                <div className="mt-3">
                   <button
                     type="button"
-                    onClick={() => {
-                      setClaimingId(bounty.id);
-                      setClaimDraft("");
-                    }}
-                    className="mt-3 rounded-md border border-stone-300 bg-white px-3 py-1.5 text-xs font-medium text-stone-700 hover:bg-stone-50"
+                    onClick={() => setShowAnswered((value) => !value)}
+                    className="text-xs text-stone-400 hover:text-stone-600"
                   >
-                    认领
+                    {showAnswered
+                      ? "收起已回答"
+                      : `已回答（${answeredBounties.length}）`}
                   </button>
-                )}
-              </li>
-            ))}
-          </ul>
-        )}
-        {answeredBounties.length > 0 && (
-          <div className="mt-3">
-            <button
-              type="button"
-              onClick={() => setShowAnswered((value) => !value)}
-              className="text-xs text-stone-400 hover:text-stone-600"
-            >
-              {showAnswered
-                ? "收起已回答"
-                : `已回答（${answeredBounties.length}）`}
-            </button>
-            {showAnswered && (
-              <ul className="mt-3 space-y-2 opacity-80">
-                {answeredBounties.map((bounty) => (
-                  <li
-                    key={bounty.id}
-                    className="rounded-xl border border-stone-200 bg-white p-4"
-                  >
-                    <p className="line-clamp-2 text-sm leading-6 text-stone-600">
-                      {bounty.question}
-                    </p>
-                    <div className="mt-1.5 text-sm">
-                      <Link
-                        href={viewHref(bounty.answered_by)}
-                        className="font-medium text-stone-800 hover:underline"
-                      >
-                        回答：{bounty.answered_by.split("/").pop()}
-                      </Link>
-                    </div>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </div>
-        )}
-      </section>
-
-      <section aria-labelledby="collision-stream-title">
-        <h2
-          id="collision-stream-title"
-          className="text-sm font-semibold text-stone-800"
-        >
-          碰撞流
-        </h2>
-        {loading ? (
-          <p className="mt-3 text-sm text-stone-400">加载中…</p>
-        ) : activeCollisions.length === 0 ? (
-          <p className="mt-3 text-sm text-stone-400">
-            还没有碰撞。写入内容后，引擎会把语义相近的笔记配对送到这里。
-          </p>
-        ) : (
-          <ul className="mt-3 space-y-3">
-            {activeCollisions.map((collision) => (
-              <CollisionCard
-                key={collision.id}
-                collision={collision}
-                onVerdict={changeVerdict}
-              />
-            ))}
-          </ul>
-        )}
-        {dismissedCollisions.length > 0 && (
-          <div className="mt-3">
-            <button
-              type="button"
-              onClick={() => setShowDismissed((value) => !value)}
-              className="text-xs text-stone-400 hover:text-stone-600"
-            >
-              {showDismissed
-                ? "收起已忽略"
-                : `展开已忽略（${dismissedCollisions.length}）`}
-            </button>
-            {showDismissed && (
-              <ul className="mt-3 space-y-3 opacity-70">
-                {dismissedCollisions.map((collision) => (
-                  <CollisionCard
-                    key={collision.id}
-                    collision={collision}
-                    onVerdict={changeVerdict}
-                  />
-                ))}
-              </ul>
-            )}
-          </div>
-        )}
-      </section>
-
-      <section aria-labelledby="spark-stream-title">
-        <h2
-          id="spark-stream-title"
-          className="text-sm font-semibold text-stone-800"
-        >
-          灵感流
-        </h2>
-        {loading ? (
-          <p className="mt-3 text-sm text-stone-400">加载中…</p>
-        ) : sparks.length === 0 ? (
-          <p className="mt-3 text-sm text-stone-400">
-            还没有碎片。用上面的快速捕获记下第一条。
-          </p>
-        ) : (
-          <ul className="mt-3 space-y-2">
-            {sparks.map((spark) => (
-              <li
-                key={spark.slug}
-                className="rounded-xl border border-stone-200 bg-white p-4"
-              >
-                <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-                  <Link
-                    href={viewHref(spark.slug)}
-                    className="min-w-0 flex-1 truncate text-sm font-medium text-stone-800 hover:underline"
-                  >
-                    {spark.title}
-                  </Link>
-                  <span className="rounded-full bg-stone-100 px-2 py-0.5 text-xs text-stone-500">
-                    {sparkAgeLabel(spark.updated, nowMs)}
-                  </span>
-                  <span className="rounded-full bg-stone-100 px-2 py-0.5 text-xs tabular-nums text-stone-500">
-                    {spark.collisions} 碰撞
-                  </span>
-                  {isStranded(spark, nowMs) && (
-                    <span className="rounded-full bg-amber-100 px-2 py-0.5 text-xs text-amber-700">
-                      搁浅
-                    </span>
+                  {showAnswered && (
+                    <ul className="mt-3 space-y-2 opacity-80">
+                      {answeredBounties.map((bounty) => (
+                        <li
+                          key={bounty.id}
+                          className="rounded-xl border border-stone-200 bg-white p-4"
+                        >
+                          <p className="line-clamp-2 text-sm leading-6 text-stone-600">
+                            {bounty.question}
+                          </p>
+                          <div className="mt-1.5 text-sm">
+                            <Link
+                              href={viewHref(bounty.answered_by)}
+                              className="font-medium text-stone-800 hover:underline"
+                            >
+                              回答：{bounty.answered_by.split("/").pop()}
+                            </Link>
+                          </div>
+                        </li>
+                      ))}
+                    </ul>
                   )}
                 </div>
-                {spark.excerpt && (
-                  <p className="mt-1.5 line-clamp-2 text-sm leading-6 text-stone-500">
-                    {spark.excerpt}
-                  </p>
-                )}
-              </li>
-            ))}
-          </ul>
-        )}
-      </section>
+              )}
+            </section>
+          )}
+
+          {tab === "collisions" && (
+            <section aria-label="碰撞流">
+              {loading ? (
+                <p className="text-sm text-stone-400">加载中…</p>
+              ) : activeCollisions.length === 0 ? (
+                <p className="text-sm text-stone-400">
+                  还没有碰撞。写入内容后，引擎会把语义相近的笔记配对送到这里。
+                </p>
+              ) : (
+                <>
+                  <ul className="space-y-3">
+                    {collisionPageData.pageItems.map((collision) => (
+                      <CollisionCard
+                        key={collision.id}
+                        collision={collision}
+                        onVerdict={changeVerdict}
+                      />
+                    ))}
+                  </ul>
+                  <Pagination
+                    page={collisionPageData.page}
+                    pageCount={collisionPageData.pageCount}
+                    onPage={setCollisionPage}
+                  />
+                </>
+              )}
+              {dismissedCollisions.length > 0 && (
+                <div className="mt-3">
+                  <button
+                    type="button"
+                    onClick={() => setShowDismissed((value) => !value)}
+                    className="text-xs text-stone-400 hover:text-stone-600"
+                  >
+                    {showDismissed
+                      ? "收起已忽略"
+                      : `展开已忽略（${dismissedCollisions.length}）`}
+                  </button>
+                  {showDismissed && (
+                    <ul className="mt-3 space-y-3 opacity-70">
+                      {dismissedCollisions.map((collision) => (
+                        <CollisionCard
+                          key={collision.id}
+                          collision={collision}
+                          onVerdict={changeVerdict}
+                        />
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              )}
+            </section>
+          )}
+
+          {tab === "sparks" && (
+            <section aria-label="灵感流">
+              {loading ? (
+                <p className="text-sm text-stone-400">加载中…</p>
+              ) : sparks.length === 0 ? (
+                <p className="text-sm text-stone-400">
+                  还没有碎片。用上面的快速捕获记下第一条。
+                </p>
+              ) : (
+                <>
+                  <ul className="space-y-2">
+                    {sparkPageData.pageItems.map((spark) => (
+                      <li
+                        key={spark.slug}
+                        className="rounded-xl border border-stone-200 bg-white p-4"
+                      >
+                        <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                          <Link
+                            href={viewHref(spark.slug)}
+                            className="min-w-0 flex-1 truncate text-sm font-medium text-stone-800 hover:underline"
+                          >
+                            {spark.title}
+                          </Link>
+                          <span className="rounded-full bg-stone-100 px-2 py-0.5 text-xs text-stone-500">
+                            {sparkAgeLabel(spark.updated, nowMs)}
+                          </span>
+                          <span className="rounded-full bg-stone-100 px-2 py-0.5 text-xs tabular-nums text-stone-500">
+                            {spark.collisions} 碰撞
+                          </span>
+                          {isStranded(spark, nowMs) && (
+                            <span className="rounded-full bg-amber-100 px-2 py-0.5 text-xs text-amber-700">
+                              搁浅
+                            </span>
+                          )}
+                        </div>
+                        {spark.excerpt && (
+                          <p className="mt-1.5 line-clamp-2 text-sm leading-6 text-stone-500">
+                            {spark.excerpt}
+                          </p>
+                        )}
+                      </li>
+                    ))}
+                  </ul>
+                  <Pagination
+                    page={sparkPageData.page}
+                    pageCount={sparkPageData.pageCount}
+                    onPage={setSparkPage}
+                  />
+                </>
+              )}
+            </section>
+          )}
+
+          {tab === "growth" && <GrowthChart />}
+        </div>
+      </div>
     </div>
   );
 }
