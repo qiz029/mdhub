@@ -9,6 +9,7 @@ export type Spark = {
   excerpt: string;
   updated: number; // Unix ms
   collisions: number;
+  source?: string; // e.g. "rss/<feed title>", "user"; may be absent pre-RSS
 };
 
 export type CollisionVerdict = "new" | "confirmed" | "dismissed";
@@ -91,6 +92,25 @@ export function isStranded(
   nowMs: number,
 ): boolean {
   return spark.collisions === 0 && sparkAgeDays(spark.updated, nowMs) > 7;
+}
+
+// groupSparksBySource splits the inspiration stream so hand-written sparks
+// (source "user"/"agent", or none from a pre-RSS backend) always stay in
+// view ahead of machine-imported RSS items.
+export function groupSparksBySource(sparks: readonly Spark[]): {
+  handwritten: Spark[];
+  rss: Spark[];
+} {
+  const handwritten: Spark[] = [];
+  const rss: Spark[] = [];
+  for (const spark of sparks) {
+    if (spark.source?.startsWith("rss/")) {
+      rss.push(spark);
+    } else {
+      handwritten.push(spark);
+    }
+  }
+  return { handwritten, rss };
 }
 
 export function viewHref(slug: string): string {

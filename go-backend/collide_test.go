@@ -70,6 +70,78 @@ func TestTopCollisions(t *testing.T) {
 			t.Fatalf("hits = %v, want empty", hits)
 		}
 	})
+
+	t.Run("same-feed pairs suppressed, cross-domain kept", func(t *testing.T) {
+		selfSlug := "_sparks/rss/aaaa11111111/entry1"
+		vecs := map[string][]float32{
+			selfSlug: {1, 0},
+			// same feed, highest score: must be suppressed entirely
+			"_sparks/rss/aaaa11111111/entry2": {0.99, 0.1411},
+			// different feed: kept
+			"_sparks/rss/bbbb22222222/entry1": {0.8, 0.6},
+			// handwritten spark and normal note: kept
+			"_sparks/inbox/idea": {0.7, 0.7142},
+			"notes/article":      {0.6, 0.8},
+		}
+		hits := topCollisions(selfSlug, self, vecs)
+		for _, h := range hits {
+			if h.slug == "_sparks/rss/aaaa11111111/entry2" {
+				t.Fatalf("same-feed pair survived: %v", hits)
+			}
+		}
+		if len(hits) != 3 {
+			t.Fatalf("hits = %v, want 3 cross-domain pairs", hits)
+		}
+		if hits[0].slug != "_sparks/rss/bbbb22222222/entry1" {
+			t.Fatalf("hits[0] = %s, want the cross-feed pair first", hits[0].slug)
+		}
+	})
+
+	t.Run("suppressed pairs do not consume top N slots", func(t *testing.T) {
+		selfSlug := "_sparks/rss/aaaa11111111/entry1"
+		vecs := map[string][]float32{selfSlug: {1, 0}}
+		// 5 same-feed entries outranking 5 cross-domain notes; without
+		// suppression the notes would be pushed out of the top 5
+		for i, slug := range []string{"e2", "e3", "e4", "e5", "e6"} {
+			vecs["_sparks/rss/aaaa11111111/"+slug] = []float32{0.99, 0.1411}
+			c := 0.9 - float64(i)*0.01
+			vecs["notes/"+slug] = []float32{float32(c), float32(math.Sqrt(1 - c*c))}
+		}
+		hits := topCollisions(selfSlug, self, vecs)
+		if len(hits) != collisionTopN {
+			t.Fatalf("len(hits) = %d, want %d (slots freed by suppression)", len(hits), collisionTopN)
+		}
+		for _, h := range hits {
+			if !strings.HasPrefix(h.slug, "notes/") {
+				t.Fatalf("same-feed pair took a slot: %v", hits)
+			}
+		}
+	})
+}
+
+func TestSameFeedSpark(t *testing.T) {
+	cases := []struct {
+		name string
+		a, b string
+		want bool
+	}{
+		{"same feed", "_sparks/rss/aaaa11111111/x", "_sparks/rss/aaaa11111111/y", true},
+		{"same slug", "_sparks/rss/aaaa11111111/x", "_sparks/rss/aaaa11111111/x", true},
+		{"different feeds", "_sparks/rss/aaaa11111111/x", "_sparks/rss/bbbb22222222/x", false},
+		{"one not rss", "_sparks/rss/aaaa11111111/x", "_sparks/inbox/x", false},
+		{"neither rss", "notes/a", "notes/b", false},
+		{"missing entry segment", "_sparks/rss/aaaa11111111", "_sparks/rss/aaaa11111111/x", false},
+		{"both missing entry segment", "_sparks/rss/aaaa11111111", "_sparks/rss/aaaa11111111", false},
+		{"empty feed hash", "_sparks/rss//x", "_sparks/rss//y", false},
+		{"prefix of a longer slug", "_sparks/rss2/aaaa/x", "_sparks/rss2/aaaa/y", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := sameFeedSpark(c.a, c.b); got != c.want {
+				t.Fatalf("sameFeedSpark(%q, %q) = %v, want %v", c.a, c.b, got, c.want)
+			}
+		})
+	}
 }
 
 func TestParseCollisionInsight(t *testing.T) {
@@ -239,8 +311,8 @@ func TestHandleSparksServesAnonymousGet(t *testing.T) {
 	mock := withMockDatabase(t)
 	isolateEditAccess(t)
 	mock.ExpectQuery("FROM documents").
-		WillReturnRows(sqlmock.NewRows([]string{"slug", "title", "excerpt", "file_mtime", "collisions"}).
-			AddRow("_sparks/1", "Spark", "idea", time.Unix(100, 0), 3))
+		WillReturnRows(sqlmock.NewRows([]string{"slug", "title", "excerpt", "file_mtime", "source", "collisions"}).
+			AddRow("_sparks/1", "Spark", "idea", time.Unix(100, 0), "rss/Test Feed", 3))
 
 	// no edit token: sparks are public
 	response := httptest.NewRecorder()
@@ -248,6 +320,7 @@ func TestHandleSparksServesAnonymousGet(t *testing.T) {
 
 	if response.Code != http.StatusOK ||
 		!strings.Contains(response.Body.String(), `"slug":"_sparks/1"`) ||
+		!strings.Contains(response.Body.String(), `"source":"rss/Test Feed"`) ||
 		!strings.Contains(response.Body.String(), `"collisions":3`) {
 		t.Fatalf("response = %d %q", response.Code, response.Body.String())
 	}

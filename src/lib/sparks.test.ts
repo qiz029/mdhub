@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  groupSparksBySource,
   isStranded,
   sparkAgeDays,
   sparkAgeLabel,
@@ -85,4 +86,35 @@ test("isStranded flags only old sparks with zero collisions", () => {
 
 test("viewHref encodes each slug segment", () => {
   assert.equal(viewHref("notes/我的 笔记"), "/view/notes/%E6%88%91%E7%9A%84%20%E7%AC%94%E8%AE%B0");
+});
+
+test("groupSparksBySource keeps hand-written sparks ahead of RSS imports", () => {
+  const spark = (slug: string, source?: string) => ({
+    slug,
+    title: slug,
+    excerpt: "",
+    updated: 0,
+    collisions: 0,
+    source,
+  });
+  const { handwritten, rss } = groupSparksBySource([
+    spark("a", "rss/少数派"),
+    spark("b", "user"),
+    spark("c", "agent"),
+    spark("d"), // pre-RSS backend: no source field
+    spark("e", "rss/另一处"),
+    spark("f", ""),
+  ]);
+  assert.deepEqual(
+    handwritten.map((s) => s.slug),
+    ["b", "c", "d", "f"],
+  );
+  assert.deepEqual(
+    rss.map((s) => s.slug),
+    ["a", "e"],
+  );
+});
+
+test("groupSparksBySource handles empty input", () => {
+  assert.deepEqual(groupSparksBySource([]), { handwritten: [], rss: [] });
 });

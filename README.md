@@ -28,8 +28,11 @@ A self-hosted, database-centric markdown publishing system. Notes live in Postgr
 
 ```bash
 createdb mdhub
-psql -d mdhub -f go-backend/schema.sql   # create tables
 ```
+
+The schema is embedded in the binary and applied automatically at every
+startup (`go-backend/migrate.go`) — every statement in `schema.sql` is
+idempotent, so there is no separate migration step on deploys.
 
 ### 2. API backend
 
@@ -124,6 +127,11 @@ The home page lists all published notes, newest first. Each gets a URL at `/view
 | `GET /api/blindbox` | One deterministically chosen collision pair per day, with both sides' excerpts |
 | `GET /api/growth` | Per-day cumulative counts (sparks, collisions, confirmed, answered, notes) plus totals |
 | `POST /api/recollide` | Queue collision detection for every embedded document (backfill) |
+| `GET /api/feeds` | RSS/Atom subscriptions with last-fetch status and per-feed spark counts |
+| `POST /api/feeds` | Subscribe by URL (validated with a live fetch; 409 on duplicate) |
+| `POST /api/feeds/{id}` | Enable/disable a subscription |
+| `POST /api/feeds/{id}/poll` | Fetch a feed immediately |
+| `DELETE /api/feeds/{id}` | Unsubscribe (imported sparks are kept) |
 
 ## Environment Variables
 
@@ -148,6 +156,7 @@ The home page lists all published notes, newest first. Each gets a URL at `/view
 | `MDHUB_LLM_MODEL` | `gpt-4o-mini` | LLM model for categorization |
 | `MDHUB_EMBED_URL` | _(unset = disabled)_ | Embedding API base, e.g. `http://localhost:11434` (Ollama) |
 | `MDHUB_EMBED_MODEL` | `qwen3-embedding:0.6b` | Embedding model for semantic search |
+| `MDHUB_FEED_INTERVAL` | `30m` (`0` = disabled) | RSS/Atom poll interval (Go duration) |
 
 ## Features
 
@@ -160,6 +169,7 @@ The home page lists all published notes, newest first. Each gets a URL at `/view
 - **Tree sidebar**: The home page has a filesystem-style sidebar — drill down level by level, with a breadcrumb bar on top.
 - **LLM semantic categories**: Optionally, an OpenAI-compatible LLM organizes published notes into a category tree that drives the sidebar. The algorithm works like a B-tree: each note descends from the root into the best-fitting folder, and any node with more than 10 direct children is split — the LLM reads the full text of that node's notes and proposes named groups. All work is local to the affected node (no global recomputation), async on write only, never on the read path; degrades to plain directory grouping when no API key is set. Frontmatter `category:` pins a note manually (never moved by splits) and always wins. Rebuild the whole tree with `POST /api/reclassify`.
 - **Sparks & collision engine**: Fleeting captures (`type: fleeting`) skip the feed, search, categories, and Universe, but still get embedded. After each embed, a background worker compares the fresh vector against the whole library (cosine ≥ 0.55, top 5) and, when an LLM key is configured, writes a non-obvious connection plus one open question per new pair. The Sparks page offers quick capture, a collision stream for confirming or dismissing pairs, and an inspiration stream that flags stranded sparks (no collisions after 7 days). Three play loops sit on top of the engine — every game move is curation, writing, or review: collision questions become claimable **bounties**, closed by writing an answer note that wiki-links both sides; a deterministic **daily blind box** shows one side of a collision pair and lets you guess the other before revealing it; and a **growth chart** plots cumulative sparks/collisions with totals for confirmed pairs and answered bounties. This is a personal space: reads (sparks, collisions, viewing fleeting notes) are fully public and authentication belongs at the edge, while writes — capturing a spark, setting a verdict, claiming a bounty — still require the edit token. Growing up is manual: rewrite a spark into a note with `publish: true`.
+- **RSS subscriptions**: A built-in poller fetches subscribed RSS/Atom feeds (conditional requests with ETag/Last-Modified, latest 20 items per fetch) and turns each new item into a spark with `source: rss/<feed title>` — imported entries flow through the same embed → collide pipeline as manual captures, and show a source badge in the inspiration stream. Manage subscriptions on the Sparks page's 订阅 tab: add by URL (validated with a live fetch), enable/disable, poll now, or unsubscribe (imported sparks are kept). Poll cadence is `MDHUB_FEED_INTERVAL` (default 30m, `0` disables the poller).
 - **Font presets**: 6 Chinese font options (system, serif, kai, hei, wenkai, fangsong).
 - **⌘K search**: Fuzzy full-text search with inline snippets.
 
@@ -167,7 +177,7 @@ The home page lists all published notes, newest first. Each gets a URL at `/view
 
 If you ran MDHub when it read the vault directly:
 
-1. Apply the new schema (note: it is **not** compatible with the v1 tables — recreate the database or `DROP TABLE documents, tags, document_tags, backlinks` first).
+1. Recreate the database (the v2 schema is **not** compatible with the v1 tables — or `DROP TABLE documents, tags, document_tags, backlinks` first). The schema itself is applied automatically on first startup.
 2. Run the import: `./mdhub-go -import "/path/to/Obsidian Vault"` — this imports all notes (published flag preserved), image files, and `_comments/*.md` threads. The import is idempotent; re-running overwrites in place.
 3. Remove `MDHUB_VAULT_PATH` / `MDHUB_VAULT` from your env files.
 

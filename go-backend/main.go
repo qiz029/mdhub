@@ -153,6 +153,9 @@ func main() {
 	}
 	log.Println("connected to postgres")
 
+	// apply the (idempotent) schema before anything touches the tables
+	mustMigrateSchema()
+
 	if *importDir != "" {
 		startClassifier()
 		startEmbedder()
@@ -177,6 +180,10 @@ func main() {
 	// background collision worker (no-op without MDHUB_EMBED_URL)
 	startCollide()
 
+	// background RSS poller (disabled with MDHUB_FEED_INTERVAL=0); the
+	// one-shot -import flow never starts it
+	startFeedPoller()
+
 	// HTTP API
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/search", handleSearch)
@@ -192,6 +199,8 @@ func main() {
 	mux.HandleFunc("/api/recollide", handleRecollide)
 	mux.HandleFunc("/api/blindbox", handleBlindbox)
 	mux.HandleFunc("/api/growth", handleGrowth)
+	mux.HandleFunc("/api/feeds", handleFeeds)
+	mux.HandleFunc("/api/feeds/", handleFeed)
 	mux.HandleFunc("/api/images", handleImage)
 	mux.HandleFunc("/api/reindex", handleReindex)
 	mux.HandleFunc("/api/reclassify", handleReclassify)

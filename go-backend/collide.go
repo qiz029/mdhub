@@ -11,6 +11,11 @@ package main
 // everything else: this is a personal space, and any multi-tenancy gate
 // lives at the ingress/proxy layer, not inside the app.
 //
+// Same-feed RSS pairs are suppressed (sameFeedSpark): entries of one feed
+// are semantically similar by nature, so colliding them with each other
+// only produces noise. Cross-feed and feed↔note pairs are exactly the
+// cross-domain signal the engine exists for, and are kept.
+//
 // Runs on a background queue (same keyedJobQueue pattern as classify.go),
 // chained from doEmbed so collisions always run against the fresh vector.
 // Disabled entirely when MDHUB_EMBED_URL is empty — collisions depend on
@@ -75,16 +80,32 @@ func collisionPair(x, y string) (string, string) {
 	return y, x
 }
 
+// sameFeedSpark reports whether both slugs are RSS sparks from the same
+// feed: "_sparks/rss/<feed hash>/<entry hash>" with an equal third segment.
+func sameFeedSpark(a, b string) bool {
+	const prefix = "_sparks/rss/"
+	if !strings.HasPrefix(a, prefix) || !strings.HasPrefix(b, prefix) {
+		return false
+	}
+	feedA := strings.SplitN(strings.TrimPrefix(a, prefix), "/", 2)
+	feedB := strings.SplitN(strings.TrimPrefix(b, prefix), "/", 2)
+	if len(feedA) < 2 || len(feedB) < 2 || feedA[0] == "" || feedB[0] == "" {
+		return false
+	}
+	return feedA[0] == feedB[0]
+}
+
 // topCollisions ranks every other vector against selfVec by cosine
 // similarity, keeping the best collisionTopN above collisionSimThreshold.
-// Pure function.
+// Same-feed RSS pairs are suppressed entirely — they neither enter the top N
+// nor consume a slot. Pure function.
 func topCollisions(self string, selfVec []float32, vecs map[string][]float32) []collisionHit {
 	if len(selfVec) == 0 {
 		return nil
 	}
 	hits := []collisionHit{}
 	for slug, vec := range vecs {
-		if slug == self {
+		if slug == self || sameFeedSpark(self, slug) {
 			continue
 		}
 		if score := cosine(selfVec, vec); score >= collisionSimThreshold {
@@ -223,6 +244,7 @@ type sparkItem struct {
 	Slug       string `json:"slug"`
 	Title      string `json:"title"`
 	Excerpt    string `json:"excerpt"`
+	Source     string `json:"source"`
 	Updated    int64  `json:"updated"` // file_mtime, Unix ms
 	Collisions int    `json:"collisions"`
 }
@@ -235,7 +257,7 @@ func handleSparks(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rows, err := db.Query(`
-		SELECT d.slug, d.title, d.excerpt, d.file_mtime,
+		SELECT d.slug, d.title, d.excerpt, d.file_mtime, d.source,
 			(SELECT COUNT(*) FROM collisions c WHERE c.slug_a=d.slug OR c.slug_b=d.slug)
 		FROM documents d
 		WHERE d.kind='fleeting'
@@ -250,7 +272,7 @@ func handleSparks(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var it sparkItem
 		var mtime time.Time
-		if err := rows.Scan(&it.Slug, &it.Title, &it.Excerpt, &mtime, &it.Collisions); err != nil {
+		if err := rows.Scan(&it.Slug, &it.Title, &it.Excerpt, &mtime, &it.Source, &it.Collisions); err != nil {
 			httpError(w, err, http.StatusInternalServerError)
 			return
 		}

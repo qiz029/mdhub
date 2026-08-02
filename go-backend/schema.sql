@@ -93,3 +93,23 @@ CREATE TABLE IF NOT EXISTS collisions (
 -- that answers it. No FK — the answer may be any document.
 ALTER TABLE collisions ADD COLUMN IF NOT EXISTS answered_by TEXT NOT NULL DEFAULT '';
 ALTER TABLE collisions ADD COLUMN IF NOT EXISTS answered_at TIMESTAMPTZ;
+
+-- RSS/Atom subscriptions for the built-in poller (feed.go). There is no
+-- items table: imported entries are documents under deterministic
+-- _sparks/rss/<hash>/<hash> slugs, which is also the dedup mechanism.
+CREATE TABLE IF NOT EXISTS feeds (
+    id BIGSERIAL PRIMARY KEY,
+    url TEXT NOT NULL UNIQUE,
+    title TEXT NOT NULL DEFAULT '',
+    enabled BOOLEAN NOT NULL DEFAULT true,
+    etag TEXT NOT NULL DEFAULT '',
+    last_modified TEXT NOT NULL DEFAULT '',
+    last_fetched_at TIMESTAMPTZ,
+    last_error TEXT NOT NULL DEFAULT '',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- idempotent migration for existing databases: subscriber-written note about
+-- what to watch for in this feed; appended to imported sparks so their
+-- embeddings carry the subscriber's angle.
+ALTER TABLE feeds ADD COLUMN IF NOT EXISTS description TEXT NOT NULL DEFAULT '';

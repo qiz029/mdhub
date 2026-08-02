@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useEffect, useState } from "react";
 import {
+  groupSparksBySource,
   isStranded,
   sparkAgeLabel,
   sparkMarkdown,
@@ -19,6 +20,12 @@ import {
   isOpenBounty,
 } from "@/lib/play";
 import { paginate } from "@/lib/paginate";
+import {
+  feedTitle,
+  relativeTimeLabel,
+  rssSourceLabel,
+  type Feed,
+} from "@/lib/feeds";
 import { GrowthChart } from "@/components/GrowthChart";
 
 const TOKEN_KEY = "mdhub-edit-token";
@@ -124,13 +131,58 @@ function CollisionCard({
   );
 }
 
-type SparkTab = "bounties" | "collisions" | "sparks" | "growth";
+function SparkListItem({
+  spark,
+  nowMs,
+  showStranded,
+}: {
+  spark: Spark;
+  nowMs: number;
+  showStranded: boolean;
+}) {
+  return (
+    <li className="rounded-xl border border-stone-200 bg-white p-4">
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+        <Link
+          href={viewHref(spark.slug)}
+          className="min-w-0 flex-1 truncate text-sm font-medium text-stone-800 hover:underline"
+        >
+          {spark.title}
+        </Link>
+        {rssSourceLabel(spark.source) && (
+          <span className="rounded-full bg-stone-100 px-2 py-0.5 text-xs text-stone-500">
+            {rssSourceLabel(spark.source)}
+          </span>
+        )}
+        <span className="rounded-full bg-stone-100 px-2 py-0.5 text-xs text-stone-500">
+          {sparkAgeLabel(spark.updated, nowMs)}
+        </span>
+        <span className="rounded-full bg-stone-100 px-2 py-0.5 text-xs tabular-nums text-stone-500">
+          {spark.collisions} 碰撞
+        </span>
+        {showStranded && isStranded(spark, nowMs) && (
+          <span className="rounded-full bg-amber-100 px-2 py-0.5 text-xs text-amber-700">
+            搁浅
+          </span>
+        )}
+      </div>
+      {spark.excerpt && (
+        <p className="mt-1.5 line-clamp-2 text-sm leading-6 text-stone-500">
+          {spark.excerpt}
+        </p>
+      )}
+    </li>
+  );
+}
+
+type SparkTab = "bounties" | "collisions" | "sparks" | "growth" | "feeds";
 
 const SPARK_TABS: { id: SparkTab; label: string }[] = [
   { id: "bounties", label: "悬赏" },
   { id: "collisions", label: "碰撞流" },
   { id: "sparks", label: "灵感流" },
   { id: "growth", label: "成长" },
+  { id: "feeds", label: "订阅" },
 ];
 
 function tabFromHash(hash: string): SparkTab {
@@ -208,6 +260,17 @@ export function SparksClient() {
   const [showAnswered, setShowAnswered] = useState(false);
   const [collisionPage, setCollisionPage] = useState(1);
   const [sparkPage, setSparkPage] = useState(1);
+  const [rssPage, setRssPage] = useState(1);
+  const [showRss, setShowRss] = useState(false);
+  const [feeds, setFeeds] = useState<Feed[]>([]);
+  const [feedsLoading, setFeedsLoading] = useState(false);
+  const [feedUrl, setFeedUrl] = useState("");
+  const [feedDescription, setFeedDescription] = useState("");
+  const [feedError, setFeedError] = useState("");
+  const [subscribing, setSubscribing] = useState(false);
+  const [busyFeedId, setBusyFeedId] = useState<number | null>(null);
+  const [editingFeedId, setEditingFeedId] = useState<number | null>(null);
+  const [descriptionDraft, setDescriptionDraft] = useState("");
 
   // Keep the active tab in the URL hash so a refresh lands back on it.
   useEffect(() => {
@@ -260,6 +323,155 @@ export function SparksClient() {
       cancelled = true;
     };
   }, []);
+
+  async function loadFeeds() {
+    setFeedsLoading(true);
+    try {
+      const res = await fetch("/mdhub/api/feeds");
+      if (!res.ok) throw new Error(`加载订阅失败（HTTP ${res.status}）`);
+      setFeeds((await res.json()) as Feed[]);
+    } catch (loadError) {
+      setFeedError(
+        loadError instanceof Error ? loadError.message : "加载订阅失败",
+      );
+    } finally {
+      setFeedsLoading(false);
+    }
+  }
+
+  // The feeds tab loads on entry; the list is public, only mutations need
+  // the edit token.
+  useEffect(() => {
+    if (tab === "feeds") {
+      setFeedError("");
+      loadFeeds();
+    }
+  }, [tab]);
+
+  async function subscribe() {
+    const url = feedUrl.trim();
+    if (!url || subscribing) return;
+    setSubscribing(true);
+    setFeedError("");
+    try {
+      const res = await fetchWithEditToken("/mdhub/api/feeds", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url, description: feedDescription.trim() }),
+      });
+      if (!res.ok) {
+        const result = (await res.json().catch(() => ({}))) as {
+          error?: string;
+        };
+        throw new Error(result.error || `订阅失败（HTTP ${res.status}）`);
+      }
+      setFeedUrl("");
+      setFeedDescription("");
+      await loadFeeds();
+    } catch (subscribeError) {
+      setFeedError(
+        subscribeError instanceof Error ? subscribeError.message : "订阅失败",
+      );
+    } finally {
+      setSubscribing(false);
+    }
+  }
+
+  async function toggleFeed(feed: Feed) {
+    if (busyFeedId !== null) return;
+    setBusyFeedId(feed.id);
+    setFeedError("");
+    const previous = feeds;
+    setFeeds((items) =>
+      items.map((item) =>
+        item.id === feed.id ? { ...item, enabled: !feed.enabled } : item,
+      ),
+    );
+    try {
+      const res = await fetchWithEditToken(`/mdhub/api/feeds/${feed.id}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ enabled: !feed.enabled }),
+      });
+      if (!res.ok) throw new Error(`操作失败（HTTP ${res.status}）`);
+    } catch (toggleError) {
+      setFeeds(previous);
+      setFeedError(
+        toggleError instanceof Error ? toggleError.message : "操作失败",
+      );
+    } finally {
+      setBusyFeedId(null);
+    }
+  }
+
+  async function pollFeedNow(feed: Feed) {
+    if (busyFeedId !== null) return;
+    setBusyFeedId(feed.id);
+    setFeedError("");
+    try {
+      const res = await fetchWithEditToken(
+        `/mdhub/api/feeds/${feed.id}/poll`,
+        { method: "POST" },
+      );
+      if (!res.ok) throw new Error(`抓取失败（HTTP ${res.status}）`);
+      await loadFeeds();
+    } catch (pollError) {
+      setFeedError(
+        pollError instanceof Error ? pollError.message : "抓取失败",
+      );
+    } finally {
+      setBusyFeedId(null);
+    }
+  }
+
+  async function saveDescription(feed: Feed) {
+    if (busyFeedId !== null) return;
+    setBusyFeedId(feed.id);
+    setFeedError("");
+    const description = descriptionDraft.trim();
+    try {
+      const res = await fetchWithEditToken(`/mdhub/api/feeds/${feed.id}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ description }),
+      });
+      if (!res.ok) throw new Error(`保存失败（HTTP ${res.status}）`);
+      setFeeds((items) =>
+        items.map((item) =>
+          item.id === feed.id ? { ...item, description } : item,
+        ),
+      );
+      setEditingFeedId(null);
+    } catch (saveError) {
+      setFeedError(
+        saveError instanceof Error ? saveError.message : "保存失败",
+      );
+    } finally {
+      setBusyFeedId(null);
+    }
+  }
+
+  async function deleteFeed(feed: Feed) {
+    if (busyFeedId !== null) return;
+    if (!window.confirm(`退订 ${feedTitle(feed)}？已导入的碎片会保留。`)) {
+      return;
+    }
+    setBusyFeedId(feed.id);
+    setFeedError("");
+    try {
+      const res = await fetchWithEditToken(`/mdhub/api/feeds/${feed.id}`, {
+        method: "DELETE",
+      });
+      if (!res.ok) throw new Error(`删除失败（HTTP ${res.status}）`);
+      setFeeds((items) => items.filter((item) => item.id !== feed.id));
+    } catch (deleteError) {
+      setFeedError(
+        deleteError instanceof Error ? deleteError.message : "删除失败",
+      );
+    } finally {
+      setBusyFeedId(null);
+    }
+  }
 
   async function capture() {
     const text = draft.trim();
@@ -374,7 +586,11 @@ export function SparksClient() {
     (c) => c.verdict === "dismissed",
   );
   const collisionPageData = paginate(activeCollisions, collisionPage, PAGE_SIZE);
-  const sparkPageData = paginate(sparks, sparkPage, PAGE_SIZE);
+  // Hand-written sparks always stay in view; RSS imports collapse into
+  // their own group behind them.
+  const { handwritten, rss } = groupSparksBySource(sparks);
+  const sparkPageData = paginate(handwritten, sparkPage, PAGE_SIZE);
+  const rssPageData = paginate(rss, rssPage, PAGE_SIZE);
 
   const tabCounts: Partial<Record<SparkTab, number>> = {
     bounties: openBounties.length,
@@ -628,51 +844,242 @@ export function SparksClient() {
                   还没有碎片。用上面的快速捕获记下第一条。
                 </p>
               ) : (
-                <>
-                  <ul className="space-y-2">
-                    {sparkPageData.pageItems.map((spark) => (
-                      <li
-                        key={spark.slug}
-                        className="rounded-xl border border-stone-200 bg-white p-4"
-                      >
-                        <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-                          <Link
-                            href={viewHref(spark.slug)}
-                            className="min-w-0 flex-1 truncate text-sm font-medium text-stone-800 hover:underline"
-                          >
-                            {spark.title}
-                          </Link>
-                          <span className="rounded-full bg-stone-100 px-2 py-0.5 text-xs text-stone-500">
-                            {sparkAgeLabel(spark.updated, nowMs)}
-                          </span>
-                          <span className="rounded-full bg-stone-100 px-2 py-0.5 text-xs tabular-nums text-stone-500">
-                            {spark.collisions} 碰撞
-                          </span>
-                          {isStranded(spark, nowMs) && (
-                            <span className="rounded-full bg-amber-100 px-2 py-0.5 text-xs text-amber-700">
-                              搁浅
-                            </span>
-                          )}
-                        </div>
-                        {spark.excerpt && (
-                          <p className="mt-1.5 line-clamp-2 text-sm leading-6 text-stone-500">
-                            {spark.excerpt}
-                          </p>
+                <div className="space-y-6">
+                  <div>
+                    <h3 className="flex items-center gap-1.5 text-sm font-semibold text-stone-800">
+                      手写
+                      <CountBadge count={handwritten.length} />
+                    </h3>
+                    {handwritten.length === 0 ? (
+                      <p className="mt-2 text-sm text-stone-400">
+                        还没有手写碎片。用上面的快速捕获记下第一条。
+                      </p>
+                    ) : (
+                      <>
+                        <ul className="mt-2 space-y-2">
+                          {sparkPageData.pageItems.map((spark) => (
+                            <SparkListItem
+                              key={spark.slug}
+                              spark={spark}
+                              nowMs={nowMs}
+                              showStranded
+                            />
+                          ))}
+                        </ul>
+                        <Pagination
+                          page={sparkPageData.page}
+                          pageCount={sparkPageData.pageCount}
+                          onPage={setSparkPage}
+                        />
+                      </>
+                    )}
+                  </div>
+                  {rss.length > 0 && (
+                    <div>
+                      <h3 className="flex items-center gap-1.5 text-sm font-semibold text-stone-800">
+                        RSS
+                        <CountBadge count={rss.length} />
+                      </h3>
+                      <div className="mt-2">
+                        <button
+                          type="button"
+                          onClick={() => setShowRss((value) => !value)}
+                          className="text-xs text-stone-400 hover:text-stone-600"
+                        >
+                          {showRss
+                            ? "收起 RSS 碎片"
+                            : `展开 RSS 碎片（${rss.length}）`}
+                        </button>
+                        {showRss && (
+                          <>
+                            <ul className="mt-2 space-y-2">
+                              {rssPageData.pageItems.map((spark) => (
+                                <SparkListItem
+                                  key={spark.slug}
+                                  spark={spark}
+                                  nowMs={nowMs}
+                                  showStranded={false}
+                                />
+                              ))}
+                            </ul>
+                            <Pagination
+                              page={rssPageData.page}
+                              pageCount={rssPageData.pageCount}
+                              onPage={setRssPage}
+                            />
+                          </>
                         )}
-                      </li>
-                    ))}
-                  </ul>
-                  <Pagination
-                    page={sparkPageData.page}
-                    pageCount={sparkPageData.pageCount}
-                    onPage={setSparkPage}
-                  />
-                </>
+                      </div>
+                    </div>
+                  )}
+                </div>
               )}
             </section>
           )}
 
           {tab === "growth" && <GrowthChart />}
+
+          {tab === "feeds" && (
+            <section aria-label="订阅">
+              <div className="flex items-center gap-2">
+                <input
+                  type="url"
+                  value={feedUrl}
+                  onChange={(event) => setFeedUrl(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") subscribe();
+                  }}
+                  placeholder="https://example.com/feed.xml"
+                  className="min-w-0 flex-1 rounded-md border border-stone-300 bg-white px-3 py-2 text-sm text-stone-800 placeholder:text-stone-400 focus:border-stone-500 focus:outline-none"
+                />
+                <button
+                  type="button"
+                  onClick={subscribe}
+                  disabled={subscribing || !feedUrl.trim()}
+                  className="shrink-0 rounded-md bg-stone-900 px-4 py-2 text-sm font-medium text-white hover:opacity-85 disabled:opacity-40"
+                >
+                  {subscribing ? "订阅中…" : "订阅"}
+                </button>
+              </div>
+              <input
+                type="text"
+                value={feedDescription}
+                onChange={(event) => setFeedDescription(event.target.value)}
+                placeholder="你为什么订这个站？会帮助碎片和你的笔记碰撞（可选）"
+                className="mt-2 w-full rounded-md border border-stone-300 bg-white px-3 py-2 text-sm text-stone-800 placeholder:text-stone-400 focus:border-stone-500 focus:outline-none"
+              />
+              <p className="mt-1.5 text-xs text-stone-400">
+                新条目会自动变成碎片，进入碰撞和灵感流。订阅需编辑令牌。
+              </p>
+              {feedError && (
+                <p className="mt-2 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+                  {feedError}
+                </p>
+              )}
+              {feedsLoading ? (
+                <p className="mt-4 text-sm text-stone-400">加载中…</p>
+              ) : feeds.length === 0 ? (
+                <p className="mt-4 text-sm text-stone-400">
+                  还没有订阅。贴上 RSS/Atom 地址试试。
+                </p>
+              ) : (
+                <ul className="mt-4 space-y-2">
+                  {feeds.map((feed) => (
+                    <li
+                      key={feed.id}
+                      className={`rounded-xl border border-stone-200 bg-white p-4 ${
+                        feed.enabled ? "" : "opacity-60"
+                      }`}
+                    >
+                      <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                        <a
+                          href={feed.url}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="min-w-0 flex-1 truncate text-sm font-medium text-stone-800 hover:underline"
+                        >
+                          {feedTitle(feed)}
+                        </a>
+                        <span className="rounded-full bg-stone-100 px-2 py-0.5 text-xs tabular-nums text-stone-500">
+                          {feed.sparks} 碎片
+                        </span>
+                        {!feed.enabled && (
+                          <span className="rounded-full bg-stone-100 px-2 py-0.5 text-xs text-stone-500">
+                            已停用
+                          </span>
+                        )}
+                      </div>
+                      {editingFeedId === feed.id ? (
+                        <div className="mt-2 flex items-center gap-2">
+                          <input
+                            type="text"
+                            value={descriptionDraft}
+                            onChange={(event) =>
+                              setDescriptionDraft(event.target.value)
+                            }
+                            onKeyDown={(event) => {
+                              if (event.key === "Enter") saveDescription(feed);
+                              if (event.key === "Escape") setEditingFeedId(null);
+                            }}
+                            placeholder="你为什么订这个站？"
+                            className="min-w-0 flex-1 rounded-md border border-stone-300 bg-white px-2.5 py-1.5 text-xs text-stone-800 placeholder:text-stone-400 focus:border-stone-500 focus:outline-none"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => saveDescription(feed)}
+                            disabled={busyFeedId !== null}
+                            className="shrink-0 rounded-md bg-stone-900 px-2.5 py-1.5 text-xs font-medium text-white hover:opacity-85 disabled:opacity-40"
+                          >
+                            保存
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setEditingFeedId(null)}
+                            disabled={busyFeedId !== null}
+                            className="shrink-0 rounded-md border border-stone-300 bg-white px-2.5 py-1.5 text-xs font-medium text-stone-700 hover:bg-stone-50 disabled:opacity-40"
+                          >
+                            取消
+                          </button>
+                        </div>
+                      ) : (
+                        feed.description && (
+                          <p className="mt-1 truncate text-xs text-stone-500">
+                            {feed.description}
+                          </p>
+                        )
+                      )}
+                      <p className="mt-1 text-xs text-stone-400">
+                        上次抓取：
+                        {relativeTimeLabel(feed.last_fetched_at, nowMs)}
+                      </p>
+                      {feed.last_error && (
+                        <p className="mt-1 text-xs text-red-600">
+                          {feed.last_error}
+                        </p>
+                      )}
+                      <div className="mt-3 flex items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={() => toggleFeed(feed)}
+                          disabled={busyFeedId !== null}
+                          className="rounded-md border border-stone-300 bg-white px-3 py-1.5 text-xs font-medium text-stone-700 hover:bg-stone-50 disabled:opacity-40"
+                        >
+                          {feed.enabled ? "停用" : "启用"}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => pollFeedNow(feed)}
+                          disabled={busyFeedId !== null}
+                          className="rounded-md border border-stone-300 bg-white px-3 py-1.5 text-xs font-medium text-stone-700 hover:bg-stone-50 disabled:opacity-40"
+                        >
+                          {busyFeedId === feed.id ? "抓取中…" : "立即抓取"}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setEditingFeedId(feed.id);
+                            setDescriptionDraft(feed.description);
+                          }}
+                          disabled={busyFeedId !== null}
+                          className="rounded-md border border-stone-300 bg-white px-3 py-1.5 text-xs font-medium text-stone-700 hover:bg-stone-50 disabled:opacity-40"
+                        >
+                          编辑描述
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => deleteFeed(feed)}
+                          disabled={busyFeedId !== null}
+                          className="rounded-md border border-red-200 bg-white px-3 py-1.5 text-xs font-medium text-red-600 hover:bg-red-50 disabled:opacity-40"
+                        >
+                          删除
+                        </button>
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </section>
+          )}
         </div>
       </div>
     </div>
