@@ -3,7 +3,7 @@ import Link from "next/link";
 import { Nav } from "@/components/Nav";
 import { ViewerActions } from "@/components/ViewerActions";
 import { ArticleComments } from "@/components/ArticleComments";
-import { DocumentCollisions } from "@/components/DocumentCollisions";
+import { ReadingCompanion } from "@/components/ReadingCompanion";
 import { ReaderSettings } from "@/components/ReaderSettings";
 import { TableOfContents } from "@/components/TableOfContents";
 import { CodeCopy } from "@/components/CodeCopy";
@@ -12,7 +12,6 @@ import { getComments } from "@/lib/comments";
 import { extractTitle, renderMarkdown } from "@/lib/markdown";
 import {
   getRelatedDocuments,
-  type RelatedDocument,
 } from "@/lib/universe";
 
 export const dynamic = "force-dynamic";
@@ -41,7 +40,17 @@ function makeLinkResolver(
   }
   return (target) => {
     if (bySlug.has(target)) return bySlug.get(target)!;
-    const lower = target.toLowerCase();
+    let decodedTarget = target;
+    try {
+      decodedTarget = target
+        .split("/")
+        .map((part) => decodeURIComponent(part))
+        .join("/");
+    } catch {
+      // Keep malformed percent sequences literal for legacy Wiki Links.
+    }
+    if (bySlug.has(decodedTarget)) return bySlug.get(decodedTarget)!;
+    const lower = decodedTarget.toLowerCase();
     return byName.get(lower) ?? byTitle.get(lower) ?? null;
   };
 }
@@ -53,44 +62,6 @@ function viewHref(slug: string): string {
       .split("/")
       .map((s) => encodeURIComponent(s))
       .join("/")
-  );
-}
-
-function RelatedDocumentLinks({ items }: { items: RelatedDocument[] }) {
-  if (items.length === 0) return null;
-  return (
-    <section
-      aria-labelledby="related-documents-title"
-      className="mt-10 border-t border-stone-100 pt-6"
-    >
-      <h2
-        id="related-documents-title"
-        className="text-sm font-semibold text-stone-800"
-      >
-        相关文档
-      </h2>
-      <ul className="mt-3 space-y-1">
-        {items.map((item) => (
-          <li key={item.slug}>
-            <Link
-              href={viewHref(item.slug)}
-              className="group flex min-h-10 items-center gap-3 rounded-lg px-2 text-sm text-stone-600 transition-colors hover:bg-stone-50 hover:text-stone-900"
-            >
-              <span className="min-w-0 flex-1 truncate">{item.title}</span>
-              <span className="text-xs tabular-nums text-stone-400">
-                {item.similarity.toFixed(2)}
-              </span>
-              <span
-                aria-hidden="true"
-                className="text-stone-300 group-hover:text-stone-500"
-              >
-                →
-              </span>
-            </Link>
-          </li>
-        ))}
-      </ul>
-    </section>
   );
 }
 
@@ -183,9 +154,12 @@ export default async function ViewPage({
             />
           </div>
           <ArticleComments html={html} slug={slug} threads={comments} />
-          <DocumentCollisions slug={slug} />
+          <ReadingCompanion
+            slug={slug}
+            title={title}
+            relatedDocuments={relatedDocuments}
+          />
           <CodeCopy />
-          <RelatedDocumentLinks items={relatedDocuments} />
           <nav className="mt-10 flex items-start justify-between gap-4 border-t border-stone-100 pt-6">
             <div className="min-w-0 flex-1">
               {prev && (

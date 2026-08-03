@@ -51,14 +51,9 @@ function timestampTitle(now: Date): string {
   return `${now.getFullYear()}-${pad2(now.getMonth() + 1)}-${pad2(now.getDate())} ${pad2(now.getHours())}:${pad2(now.getMinutes())}`;
 }
 
-// sparkMarkdown wraps a quick capture in the frontmatter contract the backend
-// parses: `type: fleeting` marks it as a spark. The title is the first line
-// (truncated) so the inspiration stream stays readable; falls back to the
-// capture time. JSON.stringify yields a valid YAML double-quoted scalar.
-export function sparkMarkdown(text: string, now: Date): string {
-  const body = text.trim();
+function sparkTitle(text: string, now: Date): string {
   const firstLine =
-    body
+    text
       .split("\n")
       .map((line) => line.trim())
       .find((line) => line.length > 0) ?? "";
@@ -67,13 +62,68 @@ export function sparkMarkdown(text: string, now: Date): string {
     .replace(/[*_`~[\]]/g, "")
     .trim();
   const runes = [...cleaned];
-  const title =
-    runes.length === 0
-      ? timestampTitle(now)
-      : runes.length > 40
-        ? runes.slice(0, 40).join("") + "…"
-        : cleaned;
+  if (runes.length === 0) return timestampTitle(now);
+  return runes.length > 40
+    ? runes.slice(0, 40).join("") + "…"
+    : cleaned;
+}
+
+// sparkMarkdown wraps a quick capture in the frontmatter contract the backend
+// parses: `type: fleeting` marks it as a spark. The title is the first line
+// (truncated) so the inspiration stream stays readable; falls back to the
+// capture time. JSON.stringify yields a valid YAML double-quoted scalar.
+export function sparkMarkdown(text: string, now: Date): string {
+  const body = text.trim();
+  const title = sparkTitle(body, now);
   return `---\ntitle: ${JSON.stringify(title)}\ntype: fleeting\n---\n\n${body}\n`;
+}
+
+export type ReadingSparkContext = {
+  sourceSlug: string;
+  sourceTitle: string;
+  emergenceTitle: string;
+  emergenceBody: string;
+};
+
+// A reading Spark is authored by the user's response. The machine-proposed
+// emergence is retained only as labelled provenance after the response.
+export function readingSparkMarkdown(
+  text: string,
+  context: ReadingSparkContext,
+  now: Date,
+): string {
+  const body = text.trim();
+  const title = sparkTitle(body, now);
+  const source = `reading/${context.sourceSlug}`;
+  const sourceTitle = context.sourceTitle
+    .replace(/[|\]]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  const wikiTarget = context.sourceSlug
+    .split("/")
+    .map((part) => encodeURIComponent(part))
+    .join("/");
+  const cue = context.emergenceBody.replace(/\s+/g, " ").trim();
+  const limitedCue = [...cue].slice(0, 360).join("");
+  return `---
+title: ${JSON.stringify(title)}
+type: fleeting
+source: ${JSON.stringify(source)}
+tags: [reading]
+---
+
+${body}
+
+---
+
+## 阅读上下文
+
+阅读来源：[[${wikiTarget}|${sourceTitle || context.sourceSlug}]]
+
+系统线索（上下文，不代表用户观点）：${context.emergenceTitle}
+
+> ${limitedCue}
+`;
 }
 
 export function sparkAgeDays(updatedMs: number, nowMs: number): number {

@@ -6,6 +6,7 @@ import {
   sparkAgeDays,
   sparkAgeLabel,
   sparkMarkdown,
+  readingSparkMarkdown,
   sparkSlug,
   viewHref,
 } from "./sparks.ts";
@@ -58,6 +59,26 @@ test("sparkMarkdown falls back to a timestamp title for empty captures", () => {
     md,
     '---\ntitle: "2026-08-01 20:15"\ntype: fleeting\n---\n\n\n',
   );
+});
+
+test("readingSparkMarkdown keeps the user response as authorship and labels system context", () => {
+  const md = readingSparkMarkdown(
+    "我认为变化的是检索目标，而不是记忆本身。",
+    {
+      sourceSlug: "papers/memory|v2]",
+      sourceTitle: "Memory | Is the New Database]",
+      emergenceTitle: "值得追问",
+      emergenceBody: "变化的是检索目标，还是记忆本身？",
+    },
+    NOW,
+  );
+
+  assert.match(md, /title: "我认为变化的是检索目标，而不是记忆本身。"/);
+  assert.match(md, /source: "reading\/papers\/memory\|v2\]"/);
+  assert.match(md, /tags: \[reading\]/);
+  assert.match(md, /阅读来源：\[\[papers\/memory%7Cv2%5D\|Memory Is the New Database\]\]/);
+  assert.match(md, /系统线索（上下文，不代表用户观点）：值得追问/);
+  assert.ok(md.indexOf("我认为变化的是") < md.indexOf("阅读上下文"));
 });
 
 test("sparkAgeDays counts whole days and never goes negative", () => {

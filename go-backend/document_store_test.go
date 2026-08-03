@@ -124,6 +124,31 @@ func TestResolveStoredSlugFallsBackToTitle(t *testing.T) {
 	}
 }
 
+func TestResolveStoredSlugDecodesEncodedPathSegments(t *testing.T) {
+	mock := withMockDatabase(t)
+	mock.ExpectBegin()
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT slug FROM documents WHERE slug=$1")).
+		WithArgs("papers/memory%7Cv2%5D").WillReturnError(sql.ErrNoRows)
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT slug FROM documents WHERE slug=$1")).
+		WithArgs("papers/memory|v2]").WillReturnRows(sqlmock.NewRows([]string{"slug"}).AddRow("papers/memory|v2]"))
+
+	slug, err := resolveStoredSlug(tx, "papers/memory%7Cv2%5D")
+	if err != nil || slug != "papers/memory|v2]" {
+		t.Fatalf("slug = %q, error = %v", slug, err)
+	}
+	mock.ExpectRollback()
+	if err := tx.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestDeleteStoredDocumentReturnsWhetherRowExisted(t *testing.T) {
 	mock := withMockDatabase(t)
 	mock.ExpectExec(regexp.QuoteMeta("DELETE FROM documents WHERE slug=$1")).

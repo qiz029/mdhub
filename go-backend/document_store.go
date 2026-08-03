@@ -4,6 +4,8 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"net/url"
+	"strings"
 )
 
 // upsertDocument commits a document and all of its derived relationships as
@@ -96,9 +98,20 @@ func resolveStoredSlug(tx *sql.Tx, ref string) (string, error) {
 		return "", err
 	}
 
+	resolvedRef := decodeStoredSlugRef(ref)
+	if resolvedRef != ref {
+		err = tx.QueryRow("SELECT slug FROM documents WHERE slug=$1", resolvedRef).Scan(&slug)
+		if err == nil {
+			return slug, nil
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return "", err
+		}
+	}
+
 	err = tx.QueryRow(
 		"SELECT slug FROM documents WHERE strpos(lower(title), lower($1)) > 0 ORDER BY length(title), slug LIMIT 1",
-		ref,
+		resolvedRef,
 	).Scan(&slug)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", nil
@@ -107,6 +120,21 @@ func resolveStoredSlug(tx *sql.Tx, ref string) (string, error) {
 		return "", err
 	}
 	return slug, nil
+}
+
+// Wiki links encode each slug segment so reserved syntax such as "|" and "]"
+// cannot terminate the link. Resolve the stored slug from those segments while
+// preserving legacy references that contain malformed percent escapes.
+func decodeStoredSlugRef(ref string) string {
+	parts := strings.Split(ref, "/")
+	for index, part := range parts {
+		decoded, err := url.PathUnescape(part)
+		if err != nil {
+			return ref
+		}
+		parts[index] = decoded
+	}
+	return strings.Join(parts, "/")
 }
 
 func deleteStoredDocument(slug string) (bool, error) {
