@@ -28,6 +28,14 @@
   --comment-bg: rgba(193, 95, 60, 0.08);
   --draft-highlight: rgba(217, 151, 87, 0.4);
   --color-white: #fffdfa;
+  --ui-heading-font: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+    "Segoe UI", sans-serif;
+  --ui-border-width: 1px;
+  --ui-border-color: var(--border-subtle);
+  --ui-card-shadow: none;
+  --ui-button-press: translateY(1px);
+  --ui-surface-pattern: none;
+  --ui-surface-pattern-size: auto;
 }
 
 /* Dark mode: flip the stone scale so every stone-* utility inverts. */
@@ -364,6 +372,178 @@ html[data-theme="contrast"].dark {
   --color-white: #080808;
 }
 
+/* Pixel and Toon deliberately change the interface's shape language as well
+   as its palette. Reader font presets below remain authoritative inside prose. */
+html[data-theme="pixel"] {
+  --background: #fff4c7;
+  --foreground: #17234a;
+  --accent: #b52d30;
+  --accent-strong: #8f1e27;
+  --border-subtle: #17234a;
+  --code-bg: #f3df9e;
+  --pre-bg: #17234a;
+  --quote-text: #39456d;
+  --quote-border: #2456c4;
+  --comment-bg: rgba(36, 86, 196, 0.11);
+  --draft-highlight: rgba(255, 188, 48, 0.48);
+  --color-stone-50: #fff9df;
+  --color-stone-100: #f3e7b6;
+  --color-stone-200: #e2d39e;
+  --color-stone-300: #b4aa8a;
+  --color-stone-400: #59627f;
+  --color-stone-500: #515b78;
+  --color-stone-600: #3e496b;
+  --color-stone-700: #2d3a60;
+  --color-stone-800: #202c52;
+  --color-stone-900: #17234a;
+  --color-white: #fffdf2;
+  --ui-heading-font: ui-monospace, "SFMono-Regular", "Cascadia Mono", Menlo,
+    Consolas, monospace;
+  --ui-border-width: 2px;
+  --ui-border-color: #17234a;
+  --ui-card-shadow: 4px 4px 0 #17234a;
+  --ui-button-press: translate(2px, 2px);
+  --ui-surface-pattern: linear-gradient(
+      rgba(23, 35, 74, 0.045) 1px,
+      transparent 1px
+    ),
+    linear-gradient(90deg, rgba(23, 35, 74, 0.045) 1px, transparent 1px);
+  --ui-surface-pattern-size: 16px 16px;
+  --radius-sm: 1px;
+  --radius-md: 2px;
+  --radius-lg: 2px;
+  --radius-xl: 3px;
+  --radius-2xl: 4px;
+  --radius-3xl: 4px;
+  --shadow-sm: 2px 2px 0 #17234a;
+  --shadow-md: 3px 3px 0 #17234a;
+  --shadow-lg: 4px 4px 0 #17234a;
+  --shadow-xl: 5px 5px 0 #17234a;
+  --shadow-2xl: 7px 7px 0 #17234a;
+}
+
+html[data-theme="pixel"].dark {
+  --background: #11182f;
+  --foreground: #fff3bd;
+  --accent: #ff675f;
+  --accent-strong: #ff9b67;
+  --border-subtle: #f5d76e;
+  --code-bg: #202b50;
+  --pre-bg: #090d1c;
+  --quote-text: #d7c992;
+  --quote-border: #65a7ff;
+  --comment-bg: rgba(101, 167, 255, 0.15);
+  --draft-highlight: rgba(255, 190, 66, 0.38);
+  --color-stone-50: #11182f;
+  --color-stone-100: #202b50;
+  --color-stone-200: #334168;
+  --color-stone-300: #526084;
+  --color-stone-400: #8992a4;
+  --color-stone-500: #b8b6a4;
+  --color-stone-600: #d0c9a5;
+  --color-stone-700: #e0d39d;
+  --color-stone-800: #efe1a9;
+  --color-stone-900: #fff3bd;
+  --color-white: #18213f;
+  --ui-border-color: #f5d76e;
+  --ui-card-shadow: 4px 4px 0 #f5d76e;
+  --ui-surface-pattern: linear-gradient(
+      rgba(245, 215, 110, 0.055) 1px,
+      transparent 1px
+    ),
+    linear-gradient(90deg, rgba(245, 215, 110, 0.055) 1px, transparent 1px);
+  --shadow-sm: 2px 2px 0 #f5d76e;
+  --shadow-md: 3px 3px 0 #f5d76e;
+  --shadow-lg: 4px 4px 0 #f5d76e;
+  --shadow-xl: 5px 5px 0 #f5d76e;
+  --shadow-2xl: 7px 7px 0 #f5d76e;
+}
+
+html[data-theme="toon"] {
+  --background: #fff5de;
+  --foreground: #422653;
+  --accent: #b82769;
+  --accent-strong: #8f1550;
+  --border-subtle: #593268;
+  --code-bg: #f6dfef;
+  --pre-bg: #422653;
+  --quote-text: #654b70;
+  --quote-border: #e15a94;
+  --comment-bg: rgba(239, 79, 145, 0.11);
+  --draft-highlight: rgba(255, 199, 55, 0.48);
+  --color-stone-50: #fff9ec;
+  --color-stone-100: #f8e7da;
+  --color-stone-200: #ecd4ce;
+  --color-stone-300: #c5acb9;
+  --color-stone-400: #765873;
+  --color-stone-500: #6c4f70;
+  --color-stone-600: #604363;
+  --color-stone-700: #543657;
+  --color-stone-800: #492c50;
+  --color-stone-900: #422653;
+  --color-white: #fffdf7;
+  --ui-heading-font: ui-rounded, "Arial Rounded MT Bold", "Avenir Next",
+    ui-sans-serif, system-ui, sans-serif;
+  --ui-border-width: 2px;
+  --ui-border-color: #593268;
+  --ui-card-shadow: 0 5px 0 #593268;
+  --ui-button-press: translateY(3px);
+  --ui-surface-pattern: radial-gradient(
+    circle,
+    rgba(239, 79, 145, 0.075) 1.5px,
+    transparent 1.7px
+  );
+  --ui-surface-pattern-size: 18px 18px;
+  --radius-sm: 0.5rem;
+  --radius-md: 0.75rem;
+  --radius-lg: 1rem;
+  --radius-xl: 1.25rem;
+  --radius-2xl: 1.5rem;
+  --radius-3xl: 1.75rem;
+  --shadow-sm: 0 2px 0 #593268;
+  --shadow-md: 0 3px 0 #593268;
+  --shadow-lg: 0 4px 0 #593268;
+  --shadow-xl: 0 5px 0 #593268;
+  --shadow-2xl: 0 7px 0 #593268;
+}
+
+html[data-theme="toon"].dark {
+  --background: #25132f;
+  --foreground: #fff0d1;
+  --accent: #ff74ad;
+  --accent-strong: #ffa5c9;
+  --border-subtle: #ffb9d5;
+  --code-bg: #3a2046;
+  --pre-bg: #160b1d;
+  --quote-text: #ddc2d4;
+  --quote-border: #ff74ad;
+  --comment-bg: rgba(255, 116, 173, 0.15);
+  --draft-highlight: rgba(255, 204, 75, 0.38);
+  --color-stone-50: #25132f;
+  --color-stone-100: #3a2046;
+  --color-stone-200: #57325e;
+  --color-stone-300: #774a78;
+  --color-stone-400: #b890ae;
+  --color-stone-500: #d3afc9;
+  --color-stone-600: #dfc2d4;
+  --color-stone-700: #ead3df;
+  --color-stone-800: #f5e3e8;
+  --color-stone-900: #fff0d1;
+  --color-white: #32183d;
+  --ui-border-color: #ffb9d5;
+  --ui-card-shadow: 0 5px 0 #ffb9d5;
+  --ui-surface-pattern: radial-gradient(
+    circle,
+    rgba(255, 116, 173, 0.09) 1.5px,
+    transparent 1.7px
+  );
+  --shadow-sm: 0 2px 0 #ffb9d5;
+  --shadow-md: 0 3px 0 #ffb9d5;
+  --shadow-lg: 0 4px 0 #ffb9d5;
+  --shadow-xl: 0 5px 0 #ffb9d5;
+  --shadow-2xl: 0 7px 0 #ffb9d5;
+}
+
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
@@ -379,6 +559,81 @@ body {
 
 html {
   scroll-behavior: smooth;
+}
+
+html[data-theme="pixel"] body,
+html[data-theme="toon"] body {
+  background-image: var(--ui-surface-pattern);
+  background-size: var(--ui-surface-pattern-size);
+  font-family: var(--ui-heading-font);
+}
+
+html[data-theme="pixel"] :where(header, nav, button, label, input, select, textarea),
+html[data-theme="toon"] :where(header, nav, button, label, input, select, textarea),
+html[data-theme="pixel"] :where(h1, h2, h3, h4):not(.prose-md *),
+html[data-theme="toon"] :where(h1, h2, h3, h4):not(.prose-md *) {
+  font-family: var(--ui-heading-font);
+}
+
+html[data-theme="pixel"] .border,
+html[data-theme="toon"] .border {
+  border-width: var(--ui-border-width);
+}
+
+html[data-theme="pixel"] :where(.border-stone-200, .border-stone-300),
+html[data-theme="toon"] :where(.border-stone-200, .border-stone-300) {
+  border-color: var(--ui-border-color);
+}
+
+html[data-theme="pixel"] :where(.border-t, .border-y),
+html[data-theme="toon"] :where(.border-t, .border-y) {
+  border-top-width: var(--ui-border-width);
+}
+
+html[data-theme="pixel"] :where(.border-b, .border-y),
+html[data-theme="toon"] :where(.border-b, .border-y) {
+  border-bottom-width: var(--ui-border-width);
+}
+
+html[data-theme="pixel"] :where(.border-l, .border-x),
+html[data-theme="toon"] :where(.border-l, .border-x) {
+  border-left-width: var(--ui-border-width);
+}
+
+html[data-theme="pixel"] :where(.border-r, .border-x),
+html[data-theme="toon"] :where(.border-r, .border-x) {
+  border-right-width: var(--ui-border-width);
+}
+
+html[data-theme="pixel"]
+  :where(section, article, aside, dialog, div, li).border:is(.bg-white, .bg-stone-50),
+html[data-theme="toon"]
+  :where(section, article, aside, dialog, div, li).border:is(.bg-white, .bg-stone-50) {
+  box-shadow: var(--ui-card-shadow);
+}
+
+html[data-theme="pixel"] button:not(:disabled):active,
+html[data-theme="toon"] button:not(:disabled):active {
+  transform: var(--ui-button-press);
+}
+
+/* The themed two-pixel rules live after Tailwind, so preserve the few utility
+   variants that intentionally remove or add a directional border. */
+html[data-theme="pixel"] [class~="last:border-0"]:last-child,
+html[data-theme="toon"] [class~="last:border-0"]:last-child {
+  border-width: 0;
+}
+
+@media (min-width: 48rem) {
+  html[data-theme="pixel"] [class~="md:border-b-0"],
+  html[data-theme="toon"] [class~="md:border-b-0"] {
+    border-bottom-width: 0;
+  }
+
+  html[data-theme="pixel"] [class~="md:border-r"],
+  html[data-theme="toon"] [class~="md:border-r"] {
+    border-right-width: var(--ui-border-width);
+  }
 }
 
 /* Visible keyboard-focus indicator everywhere (dark mode follows --accent). */

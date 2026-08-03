@@ -7,10 +7,12 @@ import {
   Contrast,
   Feather,
   FileText,
+  Gamepad2,
   Leaf,
   Monitor,
   Moon,
   Palette,
+  Sticker,
   Sun,
   type LucideProps,
 } from "lucide-react";
@@ -32,6 +34,8 @@ const themeIcons: Record<ThemePreset, ThemeIcon> = {
   midnight: Moon,
   oled: Circle,
   contrast: Contrast,
+  pixel: Gamepad2,
+  toon: Sticker,
 };
 
 const themeIconColors: Record<ThemePreset, string> = {
@@ -43,6 +47,8 @@ const themeIconColors: Record<ThemePreset, string> = {
   oled: "bg-[#000000] text-[#ffffff]",
   contrast:
     "bg-[#ffffff] text-[#000000] ring-1 ring-inset ring-[#000000]",
+  pixel: "bg-[#fff3bd] text-[#17234a] ring-2 ring-inset ring-[#d23b38]",
+  toon: "bg-[#ffd4e6] text-[#c82d75] ring-2 ring-inset ring-[#593268]",
 };
 
 const modeIcons: Record<ThemeMode, ThemeIcon> = {
@@ -117,7 +123,7 @@ export function ThemePicker({ className = "" }: { className?: string }) {
             aria-label="主题风格"
             className="absolute right-0 top-[calc(100%+0.65rem)] w-60 rounded-2xl border border-stone-200 bg-white p-3 shadow-xl"
           >
-            <div className="grid grid-cols-4 gap-2">
+            <div className="grid grid-cols-3 place-items-center gap-2">
               {THEME_PRESETS.map(({ key, label }) => {
                 const Icon = themeIcons[key];
                 const selected = key === themePreset;

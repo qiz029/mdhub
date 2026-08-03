@@ -31,8 +31,10 @@ if(!ps[p])p="paper";
 document.documentElement.dataset.theme=p;
 if(t==="dark"||(t==="system"&&window.matchMedia("(prefers-color-scheme: dark)").matches)){
 document.documentElement.classList.add("dark");}
-var f=localStorage.getItem("mdhub-font");
-if(f)document.documentElement.classList.add("font-"+f);
+var f=localStorage.getItem("mdhub-font")||"system";
+var fonts={system:1,serif:1,kai:1,hei:1,wenkai:1,fangsong:1};
+if(!fonts[f])f="system";
+document.documentElement.classList.add("font-"+f);
 var sizes={sm:"0.9375rem",md:"1.0625rem",lg:"1.1875rem",xl:"1.3125rem"};
 var s=sizes[localStorage.getItem("mdhub-font-size")||""];
 if(s)document.documentElement.style.setProperty("--reader-font-size",s);

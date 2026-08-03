@@ -5,7 +5,9 @@ export type ThemePreset =
   | "forest"
   | "midnight"
   | "oled"
-  | "contrast";
+  | "contrast"
+  | "pixel"
+  | "toon";
 
 export type ThemeMode = "light" | "dark" | "system";
 
@@ -26,6 +28,8 @@ export const THEME_PRESETS: ReadonlyArray<{
   { key: "midnight", label: "午夜" },
   { key: "oled", label: "纯黑" },
   { key: "contrast", label: "高对比" },
+  { key: "pixel", label: "像素" },
+  { key: "toon", label: "卡通" },
 ];
 
 export const THEME_MODES: ReadonlyArray<{
