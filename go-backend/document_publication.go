@@ -13,7 +13,13 @@ func publishDocument(doc *Document) error {
 	if err := upsertDocument(doc); err != nil {
 		return err
 	}
+	projectPublishedDocument(doc)
+	return nil
+}
 
+// projectPublishedDocument updates runtime and asynchronous projections only
+// after the caller's durable transaction has committed.
+func projectPublishedDocument(doc *Document) {
 	mu.Lock()
 	delete(embedIndex, doc.Slug)
 	if doc.Published {
@@ -43,7 +49,6 @@ func publishDocument(doc *Document) error {
 	if doc.Published || doc.Kind == "fleeting" {
 		enqueueEmbed(doc.Slug)
 	}
-	return nil
 }
 
 // removeDocument owns the inverse publication transition. Durable deletion

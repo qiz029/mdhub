@@ -13,6 +13,7 @@ output shape. README.md covers product overview — this file covers running it.
 | Next.js frontend | 10001 | `scripts/start.sh` | yes |
 | Ollama (embeddings) | 11434 | `brew services start ollama` | optional (semantic search) |
 | LLM chat API (any OpenAI-compatible) | remote | — | optional (tree categorization) |
+| Translation Agent Worker | — | `go-backend/run.sh -translation-worker` | optional (paper translation) |
 
 Data flows: agents/scripts → PUT markdown → Go API → PostgreSQL → Next.js reads
 via Go API. There is no filesystem dependency at runtime.
@@ -74,8 +75,30 @@ curl -s http://localhost:10002/api/universe | head -c 200   # → nodes / semant
 curl -s "http://localhost:10002/api/search?q=test"          # → JSON array
 curl -s http://localhost:10001/mdhub/ | grep -o '<title>[^<]*' # → <title>Markdown Hub
 psql -d mdhub -c '\dt'   # documents, tags, document_tags, backlinks,
-                         # images, comment_threads, comment_entries, embeddings
+                         # images, comments, embeddings, translation_jobs/chunks/artifacts
 ```
+
+### 2.7 Paper translation worker
+
+Paper translation reuses the configured OpenAI-compatible LLM provider and
+runs outside the request-serving process. Install the fixed PDF extraction
+tool, then supervise a second copy of the Go binary:
+
+```bash
+brew install poppler                   # provides pdftotext
+cd go-backend
+./run.sh -translation-worker           # continuous worker
+
+# Operator smoke mode: claim at most one queued job, then exit.
+./run.sh -translation-worker-once
+```
+
+The worker needs the same `MDHUB_PG` and LLM environment as the backend. Set
+`MDHUB_TRANSLATION_MODEL` only when translation should use a different model;
+otherwise it inherits `MDHUB_LLM_MODEL`. The source fetcher accepts public
+HTTP(S) PDFs only and rejects private, loopback, link-local, and metadata
+addresses. Translation source PDFs, chunks, leases, progress, validation, and
+draft provenance are stored in PostgreSQL.
 
 ## 3. Publishing notes (primary agent workflow)
 
@@ -252,6 +275,7 @@ Go backend (`go-backend/.env`):
 | `MDHUB_LLM_BASE_URL` | `https://api.openai.com/v1` | — |
 | `MDHUB_LLM_API_KEY` | _(empty)_ | categorization disabled |
 | `MDHUB_LLM_MODEL` | `gpt-4o-mini` | — |
+| `MDHUB_TRANSLATION_MODEL` | _(inherits `MDHUB_LLM_MODEL`)_ | uses the default LLM model |
 | `MDHUB_EMBED_URL` | _(empty)_ | semantic search disabled |
 | `MDHUB_EMBED_MODEL` | `qwen3-embedding:0.6b` | — |
 

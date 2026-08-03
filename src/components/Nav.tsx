@@ -3,7 +3,7 @@ import { Flame } from "lucide-react";
 import { SearchBar } from "./SearchBar";
 
 type NavProps = {
-  active?: "documents" | "sparks" | "universe";
+  active?: "documents" | "sparks" | "translations" | "universe";
 };
 
 function tabClass(active: boolean): string {
@@ -61,6 +61,13 @@ export function Nav({ active = "documents" }: NavProps) {
             className={tabClass(active === "sparks")}
           >
             Sparks
+          </Link>
+          <Link
+            href="/translations"
+            aria-current={active === "translations" ? "page" : undefined}
+            className={tabClass(active === "translations")}
+          >
+            Translate
           </Link>
           <Link
             href="/universe"
