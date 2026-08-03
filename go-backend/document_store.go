@@ -16,6 +16,20 @@ func upsertDocument(doc *Document) error {
 	}
 	defer tx.Rollback()
 
+	if err := upsertDocumentTx(tx, doc); err != nil {
+		return err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit document: %w", err)
+	}
+	return nil
+}
+
+// upsertDocumentTx stores the document and all relationship projections in an
+// existing transaction. It lets higher-level state machines, such as paper
+// publication, commit their own state and the document atomically.
+func upsertDocumentTx(tx *sql.Tx, doc *Document) error {
 	if _, err := tx.Exec(`
 		INSERT INTO documents (slug, file_path, title, content, raw_content, excerpt, word_count, published, kind, source, category_path, category_manual, file_mtime)
 		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,now())
@@ -69,9 +83,6 @@ func upsertDocument(doc *Document) error {
 		return fmt.Errorf("invalidate document embedding: %w", err)
 	}
 
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit document: %w", err)
-	}
 	return nil
 }
 

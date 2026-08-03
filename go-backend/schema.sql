@@ -113,3 +113,55 @@ CREATE TABLE IF NOT EXISTS feeds (
 -- what to watch for in this feed; appended to imported sparks so their
 -- embeddings carry the subscriber's angle.
 ALTER TABLE feeds ADD COLUMN IF NOT EXISTS description TEXT NOT NULL DEFAULT '';
+
+-- Durable paper-translation work. Long translations are claimed by a
+-- separately run worker and resume from persisted chunks after interruption.
+CREATE TABLE IF NOT EXISTS translation_artifacts (
+    hash       TEXT PRIMARY KEY,
+    mime       TEXT NOT NULL,
+    data       BYTEA NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS translation_jobs (
+    id               TEXT PRIMARY KEY,
+    source_input     TEXT NOT NULL,
+    source_kind      TEXT NOT NULL,
+    canonical_url    TEXT NOT NULL,
+    artifact_url     TEXT NOT NULL,
+    source_identifier TEXT NOT NULL DEFAULT '',
+    source_version   TEXT NOT NULL DEFAULT '',
+    source_title     TEXT NOT NULL DEFAULT '',
+    source_hash      TEXT NOT NULL DEFAULT '',
+    source_artifact_hash TEXT REFERENCES translation_artifacts(hash),
+    target_language  TEXT NOT NULL DEFAULT 'zh-CN',
+    profile          TEXT NOT NULL DEFAULT 'paper-translate-v1',
+    state            TEXT NOT NULL DEFAULT 'queued',
+    stage            TEXT NOT NULL DEFAULT 'queued',
+    progress_current INTEGER NOT NULL DEFAULT 0,
+    progress_total   INTEGER NOT NULL DEFAULT 0,
+    lease_owner      TEXT NOT NULL DEFAULT '',
+    lease_until      TIMESTAMPTZ,
+    provider         TEXT NOT NULL DEFAULT '',
+    model            TEXT NOT NULL DEFAULT '',
+    output_slug      TEXT NOT NULL DEFAULT '',
+    validation_report JSONB,
+    error_summary    TEXT NOT NULL DEFAULT '',
+    created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at       TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS translation_jobs_claim_idx
+    ON translation_jobs (state, lease_until, created_at);
+
+CREATE TABLE IF NOT EXISTS translation_chunks (
+    job_id          TEXT NOT NULL REFERENCES translation_jobs(id) ON DELETE CASCADE,
+    ordinal         INTEGER NOT NULL,
+    source_text     TEXT NOT NULL,
+    source_hash     TEXT NOT NULL,
+    translated_text TEXT NOT NULL DEFAULT '',
+    state           TEXT NOT NULL DEFAULT 'pending',
+    attempts        INTEGER NOT NULL DEFAULT 0,
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (job_id, ordinal)
+);

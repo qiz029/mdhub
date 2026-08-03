@@ -21,10 +21,8 @@ package main
 // Disabled entirely when MDHUB_LLM_API_KEY is empty.
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log"
 	"net/http"
 	"sort"
@@ -35,10 +33,6 @@ import (
 const maxTreeChildren = 10
 
 var (
-	llmBaseURL = getEnv("MDHUB_LLM_BASE_URL", "https://api.openai.com/v1")
-	llmAPIKey  = getEnv("MDHUB_LLM_API_KEY", "") // empty = classification disabled
-	llmModel   = getEnv("MDHUB_LLM_MODEL", "gpt-4o-mini")
-
 	treeJobs = newKeyedJobQueue[treeJob]("classify", 500)
 )
 
@@ -486,55 +480,4 @@ func validateSplit(groups []splitGroup, inputSlugs []string) error {
 		}
 	}
 	return nil
-}
-
-// ---- generic LLM call ----
-
-// llmChat performs one OpenAI-compatible chat completion and returns the
-// assistant message content. Pure apart from the HTTP call, so it is
-// testable against httptest (via the llmBaseURL/llmAPIKey/llmModel vars).
-func llmChat(client *http.Client, system, user string) (string, error) {
-	reqBody, err := json.Marshal(map[string]interface{}{
-		"model":       llmModel,
-		"temperature": 0,
-		"messages": []map[string]string{
-			{"role": "system", "content": system},
-			{"role": "user", "content": user},
-		},
-	})
-	if err != nil {
-		return "", err
-	}
-
-	req, err := http.NewRequest("POST", strings.TrimRight(llmBaseURL, "/")+"/chat/completions", bytes.NewReader(reqBody))
-	if err != nil {
-		return "", err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+llmAPIKey)
-
-	resp, err := client.Do(req)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		io.Copy(io.Discard, io.LimitReader(resp.Body, 4<<10))
-		return "", fmt.Errorf("llm http status %d", resp.StatusCode)
-	}
-
-	var out struct {
-		Choices []struct {
-			Message struct {
-				Content string `json:"content"`
-			} `json:"message"`
-		} `json:"choices"`
-	}
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&out); err != nil {
-		return "", fmt.Errorf("llm decode: %w", err)
-	}
-	if len(out.Choices) == 0 {
-		return "", fmt.Errorf("llm returned no choices")
-	}
-	return out.Choices[0].Message.Content, nil
 }

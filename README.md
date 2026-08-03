@@ -130,6 +130,10 @@ The home page lists all published notes, newest first. Each gets a URL at `/view
 | `POST /api/feeds/{id}` | Enable/disable a subscription |
 | `POST /api/feeds/{id}/poll` | Fetch a feed immediately |
 | `DELETE /api/feeds/{id}` | Unsubscribe (imported sparks are kept) |
+| `POST /api/translation-sources/resolve` | Normalize an arXiv identifier/URL or public PDF candidate URL |
+| `GET/POST /api/translation-jobs` | List jobs / queue a full-paper translation |
+| `GET /api/translation-jobs/{id}` | Job progress, validation, and bilingual chunks |
+| `POST /api/translation-jobs/{id}/{cancel,retry,publish}` | Control a translation and publish its reviewed draft |
 
 ## Environment Variables
 
@@ -151,6 +155,7 @@ The home page lists all published notes, newest first. Each gets a URL at `/view
 | `MDHUB_LLM_BASE_URL` | `https://api.openai.com/v1` | OpenAI-compatible chat API base |
 | `MDHUB_LLM_API_KEY` | _(unset = disabled)_ | LLM API key |
 | `MDHUB_LLM_MODEL` | `gpt-4o-mini` | LLM model for categorization |
+| `MDHUB_TRANSLATION_MODEL` | _(falls back to `MDHUB_LLM_MODEL`)_ | Optional model override for full-paper translation |
 | `MDHUB_EMBED_URL` | _(unset = disabled)_ | Embedding API base, e.g. `http://localhost:11434` (Ollama) |
 | `MDHUB_EMBED_MODEL` | `qwen3-embedding:0.6b` | Embedding model for semantic search |
 | `MDHUB_FEED_INTERVAL` | `30m` (`0` = disabled) | RSS/Atom poll interval (Go duration) |
@@ -167,6 +172,7 @@ The home page lists all published notes, newest first. Each gets a URL at `/view
 - **LLM semantic categories**: Optionally, an OpenAI-compatible LLM organizes published notes into a category tree that drives the sidebar. The algorithm works like a B-tree: each note descends from the root into the best-fitting folder, and any node with more than 10 direct children is split — the LLM reads the full text of that node's notes and proposes named groups. All work is local to the affected node (no global recomputation), async on write only, never on the read path; degrades to plain directory grouping when no API key is set. Frontmatter `category:` pins a note manually (never moved by splits) and always wins. Rebuild the whole tree with `POST /api/reclassify`.
 - **Sparks & collision engine**: Fleeting captures (`type: fleeting`) skip the feed, search, categories, and Universe, but still get embedded. After each embed, a background worker compares the fresh vector against the whole library (cosine ≥ 0.55, top 5) and, when an LLM key is configured, writes a non-obvious connection plus one open question per new pair. The Sparks page offers quick capture, a collision stream for confirming or dismissing pairs, and an inspiration stream that flags stranded sparks (no collisions after 7 days). Three play loops sit on top of the engine — every game move is curation, writing, or review: collision questions become claimable **bounties**, closed by writing an answer note that wiki-links both sides; a deterministic **daily blind box** shows one side of a collision pair and lets you guess the other before revealing it; and a **growth chart** plots cumulative sparks/collisions with totals for confirmed pairs and answered bounties. This is a personal space: reads (sparks, collisions, viewing fleeting notes) are fully public, writes need no token either — authentication belongs at the edge. Growing up is manual: rewrite a spark into a note with `publish: true`.
 - **RSS subscriptions**: A built-in poller fetches subscribed RSS/Atom feeds (conditional requests with ETag/Last-Modified, latest 20 items per fetch) and turns each new item into a spark with `source: rss/<feed title>` — imported entries flow through the same embed → collide pipeline as manual captures, and show a source badge in the inspiration stream. Manage subscriptions on the Sparks page's 订阅 tab: add by URL (validated with a live fetch), enable/disable, poll now, or unsubscribe (imported sparks are kept). Poll cadence is `MDHUB_FEED_INTERVAL` (default 30m, `0` disables the poller).
+- **Agent paper translation**: Paste an arXiv identifier/URL or a public URL that ultimately returns a PDF on `/translations/new`. A durable PostgreSQL job is claimed by a separately run Translation Agent Worker, which safely fetches and signature-checks the PDF, extracts it with bounded `pdftotext` output, translates bounded chunks through the existing OpenAI-compatible LLM provider with retryable typed errors, validates persisted source hashes, chunk continuity, output length, citation markers, and Markdown fences, then creates a uniquely named unpublished `_translations/<slug>` draft. The task page shows persisted progress and bilingual chunks; publication commits the document and job state atomically as an explicit final action. HTML, login, and paywalled responses transition to `needs_input`; PDF upload is a later slice. Install Poppler (`brew install poppler`) and run `go-backend/run.sh -translation-worker` beside the normal backend.
 - **Font presets**: 6 Chinese font options (system, serif, kai, hei, wenkai, fangsong).
 - **⌘K search**: Fuzzy full-text search with inline snippets.
 

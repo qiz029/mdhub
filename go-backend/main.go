@@ -122,6 +122,8 @@ const maxDocumentBytes int64 = 32 << 20
 
 func main() {
 	importDir := flag.String("import", "", "one-shot import of a vault directory into Postgres, then exit")
+	translationWorker := flag.Bool("translation-worker", false, "run the durable paper translation worker")
+	translationWorkerOnce := flag.Bool("translation-worker-once", false, "claim at most one paper translation job, then exit")
 	flag.Parse()
 
 	defer func() {
@@ -147,6 +149,12 @@ func main() {
 
 	// apply the (idempotent) schema before anything touches the tables
 	mustMigrateSchema()
+	if *translationWorker || *translationWorkerOnce {
+		if err := runTranslationWorker(context.Background(), *translationWorkerOnce); err != nil {
+			log.Fatal("translation worker:", err)
+		}
+		return
+	}
 
 	if *importDir != "" {
 		startClassifier()
@@ -193,6 +201,9 @@ func main() {
 	mux.HandleFunc("/api/growth", handleGrowth)
 	mux.HandleFunc("/api/feeds", handleFeeds)
 	mux.HandleFunc("/api/feeds/", handleFeed)
+	mux.HandleFunc("/api/translation-jobs", handleTranslationJobs)
+	mux.HandleFunc("/api/translation-jobs/", handleTranslationJob)
+	mux.HandleFunc("/api/translation-sources/resolve", handleTranslationSourceResolve)
 	mux.HandleFunc("/api/images", handleImage)
 	mux.HandleFunc("/api/reindex", handleReindex)
 	mux.HandleFunc("/api/reclassify", handleReclassify)
