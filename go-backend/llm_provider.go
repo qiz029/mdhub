@@ -32,8 +32,9 @@ type LLMRequest struct {
 }
 
 type LLMResult struct {
-	Content string
-	Model   string
+	Content      string
+	Model        string
+	FinishReason string
 }
 
 type LLMProvider interface {
@@ -183,6 +184,7 @@ func (p *openAIChatProvider) completeOnce(ctx context.Context, input LLMRequest)
 			Message struct {
 				Content string `json:"content"`
 			} `json:"message"`
+			FinishReason string `json:"finish_reason"`
 		} `json:"choices"`
 	}
 	if err := json.Unmarshal(encoded, &out); err != nil {
@@ -194,7 +196,11 @@ func (p *openAIChatProvider) completeOnce(ctx context.Context, input LLMRequest)
 	if out.Model == "" {
 		out.Model = model
 	}
-	return LLMResult{Content: out.Choices[0].Message.Content, Model: out.Model}, nil
+	return LLMResult{
+		Content:      out.Choices[0].Message.Content,
+		Model:        out.Model,
+		FinishReason: out.Choices[0].FinishReason,
+	}, nil
 }
 
 // llmChat preserves the existing short-task interface while classification

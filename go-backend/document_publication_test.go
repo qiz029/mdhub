@@ -4,9 +4,53 @@ import (
 	"errors"
 	"regexp"
 	"testing"
+	"time"
 
 	"github.com/DATA-DOG/go-sqlmock"
 )
+
+func TestCommitAndProjectDocumentPreservesCommitOrder(t *testing.T) {
+	isolatePublicationState(t)
+	firstStored := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	secondStored := make(chan struct{})
+	errors := make(chan error, 2)
+	slug := "notes/concurrent"
+
+	go func() {
+		errors <- commitAndProjectDocument(func() (*Document, error) {
+			close(firstStored)
+			<-releaseFirst
+			return &Document{Slug: slug, Title: "Draft", Published: false}, nil
+		})
+	}()
+	<-firstStored
+	go func() {
+		errors <- commitAndProjectDocument(func() (*Document, error) {
+			close(secondStored)
+			return &Document{Slug: slug, Title: "Published", Content: "current", Published: true}, nil
+		})
+	}()
+
+	select {
+	case <-secondStored:
+		t.Fatal("second durable transition entered before the first projection completed")
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(releaseFirst)
+	if err := <-errors; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-errors; err != nil {
+		t.Fatal(err)
+	}
+	mu.RLock()
+	entry := searchIndex[slug]
+	mu.RUnlock()
+	if entry == nil || entry.title != "Published" {
+		t.Fatalf("final projection = %#v, want committed published document", entry)
+	}
+}
 
 func isolatePublicationState(t *testing.T) {
 	t.Helper()

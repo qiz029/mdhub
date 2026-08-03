@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -154,10 +155,39 @@ func TestHandleReindexReloadsSearchAndEmbeddingProjections(t *testing.T) {
 	}
 }
 
+func TestHandleReindexKeepsBothExistingProjectionsWhenReloadFails(t *testing.T) {
+	mock := withMockDatabase(t)
+	isolatePublicationState(t)
+	searchIndex["old"] = &searchEntry{slug: "old"}
+	embedIndex["old"] = []float32{1}
+	mock.ExpectQuery("SELECT slug, title, content, file_mtime FROM documents").
+		WillReturnRows(sqlmock.NewRows([]string{"slug", "title", "content", "file_mtime"}).
+			AddRow("new", "New", "Body", time.Unix(100, 0)))
+	mock.ExpectQuery("SELECT e.slug, e.embedding FROM embeddings").
+		WillReturnError(errors.New("embedding store unavailable"))
+	response := httptest.NewRecorder()
+
+	handleReindex(response, httptest.NewRequest(http.MethodPost, "/api/reindex", nil))
+
+	if response.Code != http.StatusInternalServerError || searchIndex["old"] == nil || len(embedIndex["old"]) != 1 {
+		t.Fatalf("response=%d search=%#v embed=%v", response.Code, searchIndex, embedIndex)
+	}
+	if searchIndex["new"] != nil {
+		t.Fatal("partial search snapshot became visible after embedding reload failed")
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestHandleReclassifyQueuesEveryReturnedSlug(t *testing.T) {
 	mock := withMockDatabase(t)
 	isolatePublicationState(t)
-	mock.ExpectQuery("UPDATE documents SET category_path").
+	llmAPIKey = "configured"
+	previousJobs := treeJobs
+	treeJobs = newKeyedJobQueue[treeJob]("test-classify", 2)
+	t.Cleanup(func() { treeJobs = previousJobs })
+	mock.ExpectQuery("SELECT slug FROM documents").
 		WillReturnRows(sqlmock.NewRows([]string{"slug"}).AddRow("a").AddRow("b"))
 	request := httptest.NewRequest(http.MethodPost, "/api/reclassify", nil)
 	response := httptest.NewRecorder()
@@ -167,7 +197,31 @@ func TestHandleReclassifyQueuesEveryReturnedSlug(t *testing.T) {
 	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"queued":2`) {
 		t.Fatalf("response = %d %q", response.Code, response.Body.String())
 	}
+	for _, want := range []string{"a", "b"} {
+		job := <-treeJobs.ch
+		if job.value.slug != want || !job.value.reclassify {
+			t.Fatalf("job = %+v, want reclassification for %q", job.value, want)
+		}
+		treeJobs.mu.Lock()
+		delete(treeJobs.seen, job.key)
+		delete(treeJobs.latest, job.key)
+		treeJobs.mu.Unlock()
+		treeJobs.wg.Done()
+	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestHandleReclassifyRejectsDisabledClassifierWithoutMutation(t *testing.T) {
+	withMockDatabase(t)
+	isolatePublicationState(t)
+	request := httptest.NewRequest(http.MethodPost, "/api/reclassify", nil)
+	response := httptest.NewRecorder()
+
+	handleReclassify(response, request)
+
+	if response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("response = %d %q", response.Code, response.Body.String())
 	}
 }

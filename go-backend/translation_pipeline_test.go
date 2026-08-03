@@ -14,6 +14,12 @@ type recordingLLMProvider struct {
 	requests []LLMRequest
 }
 
+type truncatedLLMProvider struct{}
+
+func (truncatedLLMProvider) Complete(context.Context, LLMRequest) (LLMResult, error) {
+	return LLMResult{Content: "partial", Model: "paper-model", FinishReason: "length"}, nil
+}
+
 func (p *recordingLLMProvider) Complete(_ context.Context, request LLMRequest) (LLMResult, error) {
 	p.requests = append(p.requests, request)
 	return LLMResult{Content: "译文 " + request.User, Model: "paper-model"}, nil
@@ -47,11 +53,26 @@ func TestReadBoundedOutputRejectsBeforeUnboundedAllocation(t *testing.T) {
 
 func TestRenewTranslationLeaseDetectsLostOwnership(t *testing.T) {
 	mock := withMockDatabase(t)
-	mock.ExpectExec("UPDATE translation_jobs").
+	mock.ExpectExec("lease_until > now\\(\\)").
 		WithArgs("job-one", "worker-one").
 		WillReturnResult(sqlmock.NewResult(0, 0))
 	if err := renewTranslationLease(context.Background(), "job-one", "worker-one"); !errors.Is(err, errTranslationLeaseLost) {
 		t.Fatalf("error = %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestAdvanceTranslationStageRequiresExpectedStateAndLiveLease(t *testing.T) {
+	mock := withMockDatabase(t)
+	mock.ExpectExec("state=\\$7 AND lease_until > now\\(\\)").
+		WithArgs("translating", "translating", 2, 3, "job-one", "worker-one", "extracting").
+		WillReturnResult(sqlmock.NewResult(0, 0))
+
+	err := advanceTranslationStage("job-one", "worker-one", translationExtracting, translationTranslating, 2, 3)
+	if !errors.Is(err, errTranslationLeaseLost) {
+		t.Fatalf("error = %v, want lease lost", err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)
@@ -69,6 +90,153 @@ func TestValidateTranslationChunksRejectsMissingAndOmittedContent(t *testing.T) 
 	}
 	if len(report.Issues) != 2 {
 		t.Fatalf("issues = %#v", report.Issues)
+	}
+}
+
+func TestValidateTranslationEvidenceRejectsSelfConsistentPrefix(t *testing.T) {
+	sources := []string{"Abstract\n\nFirst half.", "Conclusion\n\nFinal half."}
+	job := TranslationJob{
+		Source:         PaperSource{Kind: "pdf", CanonicalURL: "https://example.com/paper.pdf"},
+		SourceHash:     "artifact-hash",
+		SourceManifest: buildTranslationSourceManifest("artifact-hash", sources),
+		Profile:        "paper-translate-v1",
+		Provider:       "openai-compatible",
+		Model:          "paper-model",
+	}
+	prefix := []TranslationChunk{{
+		Ordinal: 0, SourceText: sources[0], SourceHash: paperChunkHash(sources[0]), TranslatedText: "摘要\n\n前半部分。", State: "complete", Attempts: 1, Provider: "openai-compatible", Model: "paper-model",
+	}}
+
+	markdown, _ := buildTranslationMarkdown(job, prefix)
+	report := newTranslationEvidenceGate().Validate(job, prefix, markdown)
+	if report.Complete {
+		t.Fatalf("self-consistent prefix passed validation: %#v", report)
+	}
+	joined := strings.Join(report.Issues, " ")
+	for _, want := range []string{"expects 2 chunks", "manifest mismatch", "final source chunk"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("missing %q in %#v", want, report.Issues)
+		}
+	}
+}
+
+func TestValidateTranslationEvidenceRecordsCompleteProvenance(t *testing.T) {
+	source := "Conclusion"
+	job := TranslationJob{
+		Source:         PaperSource{Kind: "pdf", CanonicalURL: "https://example.com/paper.pdf"},
+		SourceHash:     "artifact-hash",
+		SourceManifest: buildTranslationSourceManifest("artifact-hash", []string{source}),
+		Profile:        "paper-translate-v1",
+		Provider:       "openai-compatible",
+		Model:          "paper-model",
+	}
+	chunks := []TranslationChunk{{
+		Ordinal: 0, SourceText: source, SourceHash: paperChunkHash(source), TranslatedText: "结论", State: "complete", Attempts: 1, Provider: "openai-compatible", Model: "paper-model",
+	}}
+	markdown, _ := buildTranslationMarkdown(job, chunks)
+	report := newTranslationEvidenceGate().Validate(job, chunks, markdown)
+	if !report.Complete || report.ArtifactHash != "artifact-hash" || report.Profile != job.Profile || report.Model != job.Model ||
+		len(report.ChunkProvenance) != 1 || report.ChunkProvenance[0].Model != "paper-model" {
+		t.Fatalf("report = %#v", report)
+	}
+}
+
+func TestTranslationEvidenceGateRecordsMixedModelResume(t *testing.T) {
+	sources := []string{"Abstract", "Conclusion"}
+	job := TranslationJob{
+		Source:         PaperSource{Kind: "pdf", CanonicalURL: "https://example.com/paper.pdf"},
+		SourceHash:     "artifact-hash",
+		SourceManifest: buildTranslationSourceManifest("artifact-hash", sources),
+		Profile:        "paper-translate-v1", Provider: "openai-compatible", Model: "new-model",
+	}
+	chunks := []TranslationChunk{
+		{Ordinal: 0, SourceText: sources[0], SourceHash: paperChunkHash(sources[0]), TranslatedText: "摘要", State: "complete", Attempts: 1, Provider: "openai-compatible", Model: "old-model"},
+		{Ordinal: 1, SourceText: sources[1], SourceHash: paperChunkHash(sources[1]), TranslatedText: "结论", State: "complete", Attempts: 1, Provider: "openai-compatible", Model: "new-model"},
+	}
+	markdown, _ := buildTranslationMarkdown(job, chunks)
+	report := newTranslationEvidenceGate().Validate(job, chunks, markdown)
+	if !report.Complete || len(report.ChunkProvenance) != 2 ||
+		report.ChunkProvenance[0].Model != "old-model" || report.ChunkProvenance[1].Model != "new-model" {
+		t.Fatalf("report = %#v", report)
+	}
+}
+
+func TestTranslationEvidenceGateRejectsUncheckpointedChunk(t *testing.T) {
+	source := "Conclusion"
+	job := TranslationJob{
+		Source:         PaperSource{Kind: "pdf", CanonicalURL: "https://example.com/paper.pdf"},
+		SourceHash:     "artifact-hash",
+		SourceManifest: buildTranslationSourceManifest("artifact-hash", []string{source}),
+		Profile:        "paper-translate-v1", Provider: "openai-compatible", Model: "paper-model",
+	}
+	chunks := []TranslationChunk{{
+		Ordinal: 0, SourceText: source, SourceHash: paperChunkHash(source), TranslatedText: "结论",
+		State: "pending", Attempts: 0,
+	}}
+	markdown, _ := buildTranslationMarkdown(job, chunks)
+	report := newTranslationEvidenceGate().Validate(job, chunks, markdown)
+	if report.Complete || len(report.InvalidChunks) != 1 || report.InvalidChunks[0] != 0 ||
+		!strings.Contains(strings.Join(report.Issues, " "), "no completed translation checkpoint") {
+		t.Fatalf("report = %#v", report)
+	}
+}
+
+func TestTranslationEvidenceGateRejectsCompletedChunkWithoutProviderProvenance(t *testing.T) {
+	source := "Conclusion"
+	job := TranslationJob{
+		Source:         PaperSource{Kind: "pdf", CanonicalURL: "https://example.com/paper.pdf"},
+		SourceHash:     "artifact-hash",
+		SourceManifest: buildTranslationSourceManifest("artifact-hash", []string{source}),
+		Profile:        "paper-translate-v1", Provider: "openai-compatible", Model: "paper-model",
+	}
+	chunks := []TranslationChunk{{
+		Ordinal: 0, SourceText: source, SourceHash: paperChunkHash(source), TranslatedText: "结论",
+		State: "complete", Attempts: 1,
+	}}
+	markdown, _ := buildTranslationMarkdown(job, chunks)
+	report := newTranslationEvidenceGate().Validate(job, chunks, markdown)
+	if report.Complete || len(report.InvalidChunks) != 1 ||
+		!strings.Contains(strings.Join(report.Issues, " "), "incomplete provider provenance") {
+		t.Fatalf("report = %#v", report)
+	}
+}
+
+func TestTranslationEvidenceGateRejectsMovingArxivSource(t *testing.T) {
+	source := "Conclusion"
+	job := TranslationJob{
+		Source:         PaperSource{Kind: "arxiv", Identifier: "2401.01234", CanonicalURL: "https://arxiv.org/abs/2401.01234"},
+		SourceHash:     "artifact-hash",
+		SourceManifest: buildTranslationSourceManifest("artifact-hash", []string{source}),
+		Profile:        "paper-translate-v1", Provider: "openai-compatible", Model: "paper-model",
+	}
+	chunks := []TranslationChunk{{
+		Ordinal: 0, SourceText: source, SourceHash: paperChunkHash(source), TranslatedText: "结论",
+		State: "complete", Attempts: 1, Provider: "openai-compatible", Model: "paper-model",
+	}}
+	markdown, _ := buildTranslationMarkdown(job, chunks)
+	report := newTranslationEvidenceGate().Validate(job, chunks, markdown)
+	if report.Complete || !strings.Contains(strings.Join(report.Issues, " "), "source revision provenance") {
+		t.Fatalf("report = %#v", report)
+	}
+}
+
+func TestTranslationEvidenceGateChecksAssembledFrontmatterProvenance(t *testing.T) {
+	source := "Conclusion"
+	job := TranslationJob{
+		Source:         PaperSource{Kind: "pdf", CanonicalURL: "https://example.com/paper.pdf"},
+		SourceHash:     "artifact-hash",
+		SourceManifest: buildTranslationSourceManifest("artifact-hash", []string{source}),
+		Profile:        "paper-translate-v1", Provider: "openai-compatible", Model: "paper-model",
+	}
+	chunks := []TranslationChunk{{
+		Ordinal: 0, SourceText: source, SourceHash: paperChunkHash(source), TranslatedText: "结论",
+		State: "complete", Attempts: 1, Provider: "openai-compatible", Model: "paper-model",
+	}}
+	markdown, _ := buildTranslationMarkdown(job, chunks)
+	markdown = strings.Replace(markdown, "source_artifact_hash: \"artifact-hash\"", "source_artifact_hash: \"other-hash\"", 1)
+	report := newTranslationEvidenceGate().Validate(job, chunks, markdown)
+	if report.Complete || !strings.Contains(strings.Join(report.Issues, " "), "mismatched source_artifact_hash") {
+		t.Fatalf("report = %#v", report)
 	}
 }
 
@@ -91,6 +259,23 @@ func TestValidateTranslationChunksRejectsTruncationAndLostStructure(t *testing.T
 	}
 }
 
+func TestValidateTranslationChunksRejectsLostDocumentStructure(t *testing.T) {
+	source := "## Methods\n\n| A | B |\n|---|---|\n| 1 | 2 |\n\n$$x=1$$\n\nClaim[^note]"
+	report := validateTranslationChunks([]TranslationChunk{{
+		Ordinal: 0, SourceText: source, SourceHash: paperChunkHash(source),
+		TranslatedText: "# 方法\n\nA 和 B\n\nx 等于一\n\n结论",
+	}})
+	if report.Complete {
+		t.Fatalf("report = %#v", report)
+	}
+	joined := strings.Join(report.Issues, " ")
+	for _, want := range []string{"changed heading order", "lost table structure", "lost formula structure", "lost footnote marker"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("missing %q in %#v", want, report.Issues)
+		}
+	}
+}
+
 func TestTranslatePaperChunksUsesFullTranslationProfileInOrder(t *testing.T) {
 	provider := &recordingLLMProvider{}
 	job := TranslationJob{TargetLanguage: "zh-CN", Profile: "paper-translate-v1"}
@@ -107,6 +292,41 @@ func TestTranslatePaperChunksUsesFullTranslationProfileInOrder(t *testing.T) {
 	if !strings.Contains(provider.requests[0].System, "不得摘要") ||
 		!strings.Contains(provider.requests[0].System, "zh-CN") {
 		t.Fatalf("system prompt = %q", provider.requests[0].System)
+	}
+}
+
+func TestTranslatePaperChunkRejectsTruncatedProviderResponse(t *testing.T) {
+	_, _, err := translatePaperChunk(context.Background(), truncatedLLMProvider{}, TranslationJob{
+		TargetLanguage: "zh-CN",
+		Profile:        "paper-translate-v1",
+	}, "source", 0, 1)
+	if err == nil || !strings.Contains(err.Error(), "incomplete provider response (length)") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestValidateTranslationDraftSizeRejectsInternalOversizeDraft(t *testing.T) {
+	source := "Conclusion"
+	job := TranslationJob{
+		Source:         PaperSource{Kind: "pdf", CanonicalURL: "https://example.com/paper.pdf"},
+		SourceHash:     "artifact-hash",
+		SourceManifest: buildTranslationSourceManifest("artifact-hash", []string{source}),
+		Profile:        "paper-translate-v1",
+		Provider:       "openai-compatible",
+		Model:          "paper-model",
+	}
+	chunks := []TranslationChunk{{
+		Ordinal: 0, SourceText: source, SourceHash: paperChunkHash(source), TranslatedText: "结论", State: "complete", Attempts: 1, Provider: "openai-compatible", Model: "paper-model",
+	}}
+	markdown, _ := buildTranslationMarkdown(job, chunks)
+	gate := translationEvidenceGate{maxDocumentBytes: int64(len(markdown) - 1)}
+	report := gate.Validate(job, chunks, markdown)
+	if report.Complete || !strings.Contains(strings.Join(report.Issues, " "), "translation draft exceeds") {
+		t.Fatalf("oversized draft passed validation: %#v", report)
+	}
+	gate.maxDocumentBytes = int64(len(markdown))
+	if report := gate.Validate(job, chunks, markdown); !report.Complete {
+		t.Fatalf("exact limit rejected: %#v", report)
 	}
 }
 

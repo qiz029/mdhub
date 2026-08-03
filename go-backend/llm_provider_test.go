@@ -63,7 +63,7 @@ func TestOpenAIChatProviderCompletesWithRequestOptions(t *testing.T) {
 		return &http.Response{
 			StatusCode: http.StatusOK,
 			Header:     make(http.Header),
-			Body:       io.NopCloser(strings.NewReader(`{"choices":[{"message":{"content":"translated"}}]}`)),
+			Body:       io.NopCloser(strings.NewReader(`{"choices":[{"message":{"content":"translated"},"finish_reason":"stop"}]}`)),
 		}, nil
 	})}
 
@@ -78,7 +78,7 @@ func TestOpenAIChatProviderCompletesWithRequestOptions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Content != "translated" || result.Model != "translation-model" {
+	if result.Content != "translated" || result.Model != "translation-model" || result.FinishReason != "stop" {
 		t.Fatalf("result = %#v", result)
 	}
 	if requestBody["model"] != "translation-model" {
@@ -90,5 +90,13 @@ func TestOpenAIChatProviderCompletesWithRequestOptions(t *testing.T) {
 	messages, ok := requestBody["messages"].([]any)
 	if !ok || len(messages) != 2 {
 		t.Fatalf("messages = %#v", requestBody["messages"])
+	}
+}
+
+func TestLLMProviderErrorExposesTypedCause(t *testing.T) {
+	cause := errors.New("connection reset")
+	err := &LLMProviderError{Kind: LLMErrorTransport, Err: cause}
+	if !strings.Contains(err.Error(), string(LLMErrorTransport)) || !errors.Is(err, cause) {
+		t.Fatalf("error = %v", err)
 	}
 }

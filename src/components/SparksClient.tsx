@@ -13,12 +13,7 @@ import {
   type CollisionVerdict,
   type Spark,
 } from "@/lib/sparks";
-import {
-  answerMarkdown,
-  answerSlug,
-  bountyAgeLabel,
-  isOpenBounty,
-} from "@/lib/play";
+import { bountyAgeLabel, isOpenBounty } from "@/lib/play";
 import { paginate } from "@/lib/paginate";
 import {
   feedTitle,
@@ -500,42 +495,27 @@ export function SparksClient() {
     }
   }
 
-  // Claiming a bounty is writing the answer: PUT the answer note first,
-  // then close the bounty by posting its slug.
+  // The backend stores the answer note and closes the bounty atomically.
   async function submitClaim(collision: Collision) {
-    if (claiming) return;
+    if (claiming || !claimDraft.trim()) return;
     setClaiming(true);
     setError("");
     try {
-      const now = new Date();
-      const slug = answerSlug(collision.id, now, Math.random);
-      const endpoint =
-        "/mdhub/api/document/" +
-        slug
-          .split("/")
-          .map((part) => encodeURIComponent(part))
-          .join("/");
-      const putRes = await fetch(endpoint, {
-        method: "PUT",
-        headers: { "Content-Type": "text/markdown; charset=utf-8" },
-        body: answerMarkdown(collision, claimDraft),
-      });
-      if (!putRes.ok) {
-        const result = (await putRes.json().catch(() => ({}))) as {
-          error?: string;
-        };
-        throw new Error(result.error || `保存回答失败（HTTP ${putRes.status}）`);
-      }
       const answerRes = await fetch(
         `/mdhub/api/collisions/${collision.id}/answer`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ slug }),
+          body: JSON.stringify({ answer: claimDraft }),
         },
       );
       if (!answerRes.ok) {
-        throw new Error(`认领失败（HTTP ${answerRes.status}）`);
+        const result = (await answerRes.json().catch(() => ({}))) as {
+          error?: string;
+        };
+        throw new Error(
+          result.error || `提交回答失败（HTTP ${answerRes.status}）`,
+        );
       }
       setClaimingId(null);
       setClaimDraft("");
@@ -682,7 +662,7 @@ export function SparksClient() {
                             <button
                               type="button"
                               onClick={() => submitClaim(bounty)}
-                              disabled={claiming}
+                              disabled={claiming || !claimDraft.trim()}
                               className="rounded-md bg-stone-900 px-3 py-1.5 text-xs font-medium text-white hover:opacity-85 disabled:opacity-40"
                             >
                               {claiming ? "提交中…" : "提交回答"}

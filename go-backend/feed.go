@@ -15,6 +15,8 @@ package main
 // lives at the ingress layer, not inside the app.
 
 import (
+	"bytes"
+	"context"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
@@ -38,6 +40,11 @@ var (
 
 	// feedPollMu serializes ticker rounds against manual polls.
 	feedPollMu sync.Mutex
+	// feedHTTPClient is the production adapter to the shared remote-source
+	// safety policy. Tests replace it with an in-memory transport.
+	feedHTTPClient = func() *remoteSourceClient {
+		return newRemoteSourceClient(feedHTTPTimeout)
+	}
 
 	// pollFeedLater runs one feed poll in the background. A var so tests can
 	// stub out the goroutine.
@@ -52,7 +59,7 @@ var (
 				log.Printf("load feed %s: %v", id, err)
 				return
 			}
-			if err := pollFeed(f, &http.Client{Timeout: feedHTTPTimeout}); err != nil {
+			if err := pollFeed(f, feedHTTPClient()); err != nil {
 				log.Printf("poll feed %s: %v", f.URL, err)
 			}
 		}()
@@ -88,25 +95,40 @@ func feedPollInterval() time.Duration {
 	return d
 }
 
-// startFeedPoller launches the background loop; returns false when disabled.
+// startFeedPoller launches the background loop and exposes its lifecycle so
+// callers can cancel and wait for it before releasing shared resources.
 // Called only from the server branch of main — never from -import.
-func startFeedPoller() bool {
+func startFeedPoller(ctx context.Context) (bool, <-chan struct{}) {
+	done := make(chan struct{})
 	interval := feedPollInterval()
 	if interval <= 0 {
 		log.Println("feed poller disabled (MDHUB_FEED_INTERVAL=0)")
-		return false
+		close(done)
+		return false, done
 	}
 	go func() {
-		time.Sleep(feedFirstDelay)
-		pollAllFeeds()
+		defer close(done)
+		first := time.NewTimer(feedFirstDelay)
+		defer first.Stop()
+		select {
+		case <-ctx.Done():
+			return
+		case <-first.C:
+			pollAllFeeds()
+		}
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
-		for range ticker.C {
-			pollAllFeeds()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				pollAllFeeds()
+			}
 		}
 	}()
 	log.Printf("feed poller started, interval %s", interval)
-	return true
+	return true, done
 }
 
 // pollAllFeeds fetches every enabled feed, one at a time.
@@ -129,7 +151,7 @@ func pollAllFeeds() {
 	}
 	rows.Close()
 
-	client := &http.Client{Timeout: feedHTTPTimeout}
+	client := feedHTTPClient()
 	for _, f := range feeds {
 		if err := pollFeed(f, client); err != nil {
 			log.Printf("poll feed %s: %v", f.URL, err)
@@ -139,8 +161,12 @@ func pollAllFeeds() {
 
 // fetchFeed performs one conditional GET and parses the body. A 304 is not
 // an error: it returns the status with a nil feed.
-func fetchFeed(client *http.Client, feedURL, etag, lastModified string) (status int, parsed *gofeed.Feed, newETag, newLastModified string, err error) {
-	req, err := http.NewRequest("GET", feedURL, nil)
+func fetchFeed(client *remoteSourceClient, feedURL, etag, lastModified string) (status int, parsed *gofeed.Feed, newETag, newLastModified string, err error) {
+	parsedURL, err := url.Parse(feedURL)
+	if err != nil || validateRemoteSourceURL(parsedURL) != nil {
+		return 0, nil, "", "", fmt.Errorf("invalid feed url")
+	}
+	req, err := http.NewRequest("GET", parsedURL.String(), nil)
 	if err != nil {
 		return 0, nil, "", "", err
 	}
@@ -163,7 +189,11 @@ func fetchFeed(client *http.Client, feedURL, etag, lastModified string) (status 
 		io.Copy(io.Discard, io.LimitReader(resp.Body, 4<<10))
 		return resp.StatusCode, nil, "", "", fmt.Errorf("feed http status %d", resp.StatusCode)
 	}
-	parsed, err = gofeed.NewParser().Parse(io.LimitReader(resp.Body, 8<<20))
+	body, err := readRemoteSourceBody(resp.Body, 8<<20)
+	if err != nil {
+		return resp.StatusCode, nil, "", "", fmt.Errorf("read feed: %w", err)
+	}
+	parsed, err = gofeed.NewParser().Parse(bytes.NewReader(body))
 	if err != nil {
 		return resp.StatusCode, nil, "", "", fmt.Errorf("parse feed: %w", err)
 	}
@@ -172,7 +202,7 @@ func fetchFeed(client *http.Client, feedURL, etag, lastModified string) (status 
 
 // pollFeed fetches one feed and imports new items. Fetch/parse failures are
 // recorded in last_error and returned; the caller moves on to the next feed.
-func pollFeed(f feedRow, client *http.Client) error {
+func pollFeed(f feedRow, client *remoteSourceClient) error {
 	status, parsed, etag, lastModified, err := fetchFeed(client, f.URL, f.ETag, f.LastModified)
 	if err != nil {
 		return recordFeedError(f.ID, err)
@@ -383,7 +413,7 @@ func createFeed(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	client := &http.Client{Timeout: feedHTTPTimeout}
+	client := feedHTTPClient()
 	_, parsed, _, _, err := fetchFeed(client, body.URL, "", "")
 	if err != nil {
 		httpError(w, err, http.StatusBadRequest)

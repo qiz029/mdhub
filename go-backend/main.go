@@ -22,10 +22,12 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 	"unicode"
 	"unicode/utf8"
@@ -150,7 +152,9 @@ func main() {
 	// apply the (idempotent) schema before anything touches the tables
 	mustMigrateSchema()
 	if *translationWorker || *translationWorkerOnce {
-		if err := runTranslationWorker(context.Background(), *translationWorkerOnce); err != nil {
+		workerCtx, stopWorker := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stopWorker()
+		if err := runTranslationWorker(workerCtx, *translationWorkerOnce); err != nil && !errors.Is(err, context.Canceled) {
 			log.Fatal("translation worker:", err)
 		}
 		return
@@ -168,8 +172,9 @@ func main() {
 	}
 
 	// build the in-memory search index from Postgres (the single store)
-	loadIndexFromDB()
-	loadEmbeddingsFromDB()
+	if err := reloadKnowledgeProjections(); err != nil {
+		log.Fatal("load knowledge projections:", err)
+	}
 
 	// background LLM categorization worker (no-op without an API key)
 	startClassifier()
@@ -182,7 +187,7 @@ func main() {
 
 	// background RSS poller (disabled with MDHUB_FEED_INTERVAL=0); the
 	// one-shot -import flow never starts it
-	startFeedPoller()
+	startFeedPoller(context.Background())
 
 	// HTTP API
 	mux := http.NewServeMux()
@@ -251,13 +256,12 @@ func scanVaultFiles() []string {
 	return files
 }
 
-// loadIndexFromDB rebuilds the in-memory search index from all published
-// documents stored in Postgres.
-func loadIndexFromDB() {
+// readSearchIndexFromDB builds a replacement snapshot without mutating the
+// active projection. Callers can therefore fail without exposing partial data.
+func readSearchIndexFromDB() (map[string]*searchEntry, error) {
 	rows, err := db.Query("SELECT slug, title, content, file_mtime FROM documents WHERE published=true")
 	if err != nil {
-		log.Printf("load index: %v", err)
-		return
+		return nil, fmt.Errorf("load search index: %w", err)
 	}
 	defer rows.Close()
 
@@ -266,21 +270,16 @@ func loadIndexFromDB() {
 		var e searchEntry
 		var mtime time.Time
 		if err := rows.Scan(&e.slug, &e.title, &e.display, &mtime); err != nil {
-			log.Printf("scan search index: %v", err)
-			return
+			return nil, fmt.Errorf("scan search index: %w", err)
 		}
 		e.plain = strings.ToLower(e.display)
 		e.mtime = mtime.UnixMilli()
 		newIndex[e.slug] = &e
 	}
 	if err := rows.Err(); err != nil {
-		log.Printf("read search index: %v", err)
-		return
+		return nil, fmt.Errorf("read search index: %w", err)
 	}
-	mu.Lock()
-	searchIndex = newIndex
-	mu.Unlock()
-	log.Printf("index loaded, %d published docs", len(newIndex))
+	return newIndex, nil
 }
 
 func parseFile(fp string) (*Document, error) {
@@ -1347,20 +1346,26 @@ func handleReindex(w http.ResponseWriter, r *http.Request) {
 		httpError(w, fmt.Errorf("method not allowed"), http.StatusMethodNotAllowed)
 		return
 	}
-	loadIndexFromDB()
-	loadEmbeddingsFromDB()
+	if err := reloadKnowledgeProjections(); err != nil {
+		httpError(w, err, http.StatusInternalServerError)
+		return
+	}
 	writeJSON(w, map[string]string{"status": "ok"})
 }
 
-// handleReclassify clears the category of every published non-manual doc
-// and queues it for tree insertion. POST only; responds with {"queued": N}.
+// handleReclassify queues every published non-manual document for replacement
+// classification. Existing categories remain visible until a fenced worker
+// result is ready, so a disabled/full worker cannot destructively clear them.
 func handleReclassify(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		httpError(w, fmt.Errorf("method not allowed"), 405)
 		return
 	}
-	rows, err := db.Query(
-		"UPDATE documents SET category_path='' WHERE published AND NOT category_manual RETURNING slug")
+	if llmAPIKey == "" {
+		httpError(w, fmt.Errorf("classification is disabled"), http.StatusServiceUnavailable)
+		return
+	}
+	rows, err := db.Query("SELECT slug FROM documents WHERE published AND NOT category_manual")
 	if err != nil {
 		httpError(w, err, 500)
 		return
@@ -1369,8 +1374,11 @@ func handleReclassify(w http.ResponseWriter, r *http.Request) {
 	queued := 0
 	for rows.Next() {
 		var slug string
-		if rows.Scan(&slug) == nil {
-			enqueueInsert(slug)
+		if err := rows.Scan(&slug); err != nil {
+			httpError(w, err, http.StatusInternalServerError)
+			return
+		}
+		if enqueueReclassify(slug) {
 			queued++
 		}
 	}

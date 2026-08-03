@@ -41,9 +41,10 @@ var (
 // (split=true, splitPath set — note the root node's path is "", so the
 // dispatch flag must be explicit).
 type treeJob struct {
-	slug      string
-	splitPath string
-	split     bool
+	slug       string
+	splitPath  string
+	split      bool
+	reclassify bool
 }
 
 // sanitizeCategory normalizes a slash-separated category path: trims each
@@ -95,22 +96,26 @@ func joinPath(parent, name string) string {
 }
 
 // enqueueInsert queues a note for tree insertion.
-func enqueueInsert(slug string) {
-	enqueueTree(treeJob{slug: slug}, slug)
+func enqueueInsert(slug string) bool {
+	return enqueueTree(treeJob{slug: slug}, slug)
+}
+
+func enqueueReclassify(slug string) bool {
+	return enqueueTree(treeJob{slug: slug, reclassify: true}, slug)
 }
 
 // enqueueSplit queues a node for splitting.
-func enqueueSplit(path string) {
-	enqueueTree(treeJob{splitPath: path, split: true}, "split:"+path)
+func enqueueSplit(path string) bool {
+	return enqueueTree(treeJob{splitPath: path, split: true}, "split:"+path)
 }
 
 // enqueueTree queues a job under a dedup key. No-op when the feature is
 // disabled; drops (logged) when the queue is full.
-func enqueueTree(job treeJob, key string) {
+func enqueueTree(job treeJob, key string) bool {
 	if llmAPIKey == "" {
-		return
+		return false
 	}
-	treeJobs.enqueue(key, job)
+	return treeJobs.enqueue(key, job)
 }
 
 // startClassifier launches the background worker; no-op without an API key.
@@ -123,6 +128,9 @@ func startClassifier() {
 	treeJobs.start(func(job treeJob) error {
 		if job.split {
 			return doSplit(job.splitPath, client)
+		}
+		if job.reclassify {
+			return doClassify(job.slug, true, client)
 		}
 		return doInsert(job.slug, client)
 	})
@@ -208,14 +216,22 @@ func childrenOf(path string) (int, error) {
 // root through LLM-chosen folders (at most 5 levels), stores the resulting
 // path and queues a split if the placement node overflowed.
 func doInsert(slug string, client *http.Client) error {
+	return doClassify(slug, false, client)
+}
+
+// doClassify computes a placement from one immutable document revision and
+// stores it only if the document is still published, automatic, and unchanged.
+// Reclassification keeps the previous category until a replacement is ready.
+func doClassify(slug string, reclassify bool, client *http.Client) error {
 	var title, content, cp string
 	var manual bool
+	var revision time.Time
 	if err := db.QueryRow(
-		"SELECT title, content, category_path, category_manual FROM documents WHERE slug=$1", slug).
-		Scan(&title, &content, &cp, &manual); err != nil {
+		"SELECT title, content, category_path, category_manual, file_mtime FROM documents WHERE slug=$1 AND published", slug).
+		Scan(&title, &content, &cp, &manual, &revision); err != nil {
 		return err
 	}
-	if manual || cp != "" {
+	if manual || (!reclassify && cp != "") {
 		return nil // pinned, or already placed (e.g. by a split)
 	}
 
@@ -238,8 +254,18 @@ func doInsert(slug string, client *http.Client) error {
 		path = joinPath(path, name)
 	}
 
-	if _, err := db.Exec("UPDATE documents SET category_path=$1 WHERE slug=$2", path, slug); err != nil {
+	result, err := db.Exec(`UPDATE documents SET category_path=$1
+		WHERE slug=$2 AND file_mtime=$3 AND category_path=$4 AND published AND NOT category_manual`,
+		path, slug, revision, cp)
+	if err != nil {
 		return err
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows != 1 {
+		return nil
 	}
 	log.Printf("inserted %s -> %q", slug, path)
 

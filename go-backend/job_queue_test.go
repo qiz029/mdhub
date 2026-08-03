@@ -2,6 +2,8 @@ package main
 
 import (
 	"fmt"
+	"reflect"
+	"sync"
 	"testing"
 )
 
@@ -17,22 +19,44 @@ func TestKeyedJobQueueCountsBeforePublishing(t *testing.T) {
 	}
 }
 
-func TestKeyedJobQueueDeduplicatesUntilCompletion(t *testing.T) {
+func TestKeyedJobQueueCoalescesLatestValueWhileRunning(t *testing.T) {
 	queue := newKeyedJobQueue[int]("test", 2)
 	release := make(chan struct{})
-	queue.start(func(int) error {
+	started := make(chan int, 2)
+	var mu sync.Mutex
+	var handled []int
+	queue.start(func(value int) error {
+		started <- value
 		<-release
+		mu.Lock()
+		handled = append(handled, value)
+		mu.Unlock()
 		return nil
 	})
 	if !queue.enqueue("same", 1) {
 		t.Fatal("first job was not queued")
 	}
+	if got := <-started; got != 1 {
+		t.Fatalf("first value = %d", got)
+	}
 	if queue.enqueue("same", 2) {
 		t.Fatal("duplicate job was queued")
 	}
+	if queue.enqueue("same", 3) {
+		t.Fatal("second duplicate job was queued")
+	}
 
 	release <- struct{}{}
+	if got := <-started; got != 3 {
+		t.Fatalf("coalesced value = %d, want latest 3", got)
+	}
+	release <- struct{}{}
 	queue.wait()
+	mu.Lock()
+	if !reflect.DeepEqual(handled, []int{1, 3}) {
+		t.Fatalf("handled = %v, want [1 3]", handled)
+	}
+	mu.Unlock()
 	if !queue.enqueue("same", 3) {
 		t.Fatal("completed key could not be queued again")
 	}

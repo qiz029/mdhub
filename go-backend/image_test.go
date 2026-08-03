@@ -77,6 +77,39 @@ func TestParseImageUpload(t *testing.T) {
 	}
 }
 
+func TestHandleImageUploadStoresContentAddressedBlob(t *testing.T) {
+	mock := withMockDatabase(t)
+	data := testPNG(t, 16, 16)
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	part, err := writer.CreateFormFile("file", "diagram.png")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := part.Write(data); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	path := uploadedImagePath(data, "image/png")
+	mock.ExpectExec("INSERT INTO images").
+		WithArgs(path, data, "image/png").
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	request := httptest.NewRequest(http.MethodPost, "/api/images", &body)
+	request.Header.Set("Content-Type", writer.FormDataContentType())
+	response := httptest.NewRecorder()
+
+	handleImage(response, request)
+
+	if response.Code != http.StatusCreated || !strings.Contains(response.Body.String(), `"path":"`+path+`"`) {
+		t.Fatalf("status=%d body=%q", response.Code, response.Body.String())
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestOptimizeUploadedImageResizesAndEncodesWebP(t *testing.T) {
 	data := testPNG(t, 2601, 4)
 	optimized, mime, err := optimizeUploadedImage(data, "image/png")

@@ -15,6 +15,7 @@ export function TranslationJobClient({ id }: { id: string }) {
   const [job, setJob] = useState<TranslationJobDetail | null>(null);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState("");
+  const [uploading, setUploading] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -69,6 +70,31 @@ export function TranslationJobClient({ id }: { id: string }) {
     }
   }
 
+  async function uploadPDF(file: File) {
+    if (uploading || busy) return;
+    setUploading(true);
+    setError("");
+    try {
+      const form = new FormData();
+      form.set("file", file);
+      const response = await fetch(
+        `/mdhub/api/translation-jobs/${encodeURIComponent(id)}/source`,
+        { method: "POST", body: form },
+      );
+      const result = (await response.json().catch(() => ({}))) as
+        | TranslationJobDetail
+        | { error?: string };
+      if (!response.ok) {
+        throw new Error("error" in result && result.error ? result.error : `上传失败（HTTP ${response.status}）`);
+      }
+      window.location.reload();
+    } catch (uploadError) {
+      setError(uploadError instanceof Error ? uploadError.message : "上传失败");
+    } finally {
+      setUploading(false);
+    }
+  }
+
   if (!job) {
     return <p className="py-16 text-center text-sm text-stone-400">{error || "加载任务中…"}</p>;
   }
@@ -111,7 +137,7 @@ export function TranslationJobClient({ id }: { id: string }) {
                 {busy === "publish" ? "发布中…" : "发布到 MDHub"}
               </button>
             )}
-            {(job.state === "failed" || job.state === "needs_input") && (
+            {job.state === "failed" && (
               <button
                 type="button"
                 onClick={() => action("retry")}
@@ -154,12 +180,38 @@ export function TranslationJobClient({ id }: { id: string }) {
             {job.error}
           </div>
         )}
+        {job.state === "needs_input" && (
+          <div className="mt-5 rounded-xl border border-amber-200 bg-amber-50 p-4">
+            <p className="text-sm font-medium text-amber-900">当前地址无法直接取得论文全文。</p>
+            <p className="mt-1 text-xs leading-5 text-amber-700">
+              上传 PDF 后会保留这个任务，并从持久化来源重新开始完整翻译。
+            </p>
+            <label className="mt-3 inline-flex min-h-10 cursor-pointer items-center rounded-lg bg-stone-900 px-4 text-sm font-semibold text-white has-[:disabled]:cursor-not-allowed has-[:disabled]:opacity-40">
+              {uploading ? "上传中…" : "选择 PDF 并继续"}
+              <input
+                type="file"
+                accept="application/pdf,.pdf"
+                disabled={uploading || !!busy}
+                className="sr-only"
+                onChange={(event) => {
+                  const file = event.currentTarget.files?.[0];
+                  if (file) void uploadPDF(file);
+                }}
+              />
+            </label>
+          </div>
+        )}
         {error && <p className="mt-4 text-sm text-red-600">{error}</p>}
 
         {job.validation && (
           <div className="mt-5 rounded-lg border border-stone-200 bg-stone-50 p-3 text-sm text-stone-600">
             完整性校验：{job.validation.translated_chunks}/{job.validation.source_chunks} 个片段
             {job.validation.complete ? "，通过" : "，未通过"}
+            {job.validation.artifact_hash && (
+              <span className="mt-1 block font-mono text-[11px] text-stone-400">
+                PDF {job.validation.artifact_hash.slice(0, 12)}
+              </span>
+            )}
           </div>
         )}
 

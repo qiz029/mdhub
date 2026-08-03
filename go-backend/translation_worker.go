@@ -9,7 +9,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -28,6 +27,7 @@ const (
 
 var errTranslationLeaseLost = errors.New("translation job lease lost")
 var errPaperNeedsInput = errors.New("paper source requires a PDF upload")
+var errInvalidPaperPDF = errors.New("invalid PDF upload")
 
 type paperArtifact struct {
 	Hash string
@@ -38,7 +38,7 @@ type paperArtifact struct {
 type translationAgentWorker struct {
 	id       string
 	provider LLMProvider
-	client   *http.Client
+	client   *remoteSourceClient
 	extract  func(context.Context, []byte) (string, error)
 }
 
@@ -47,7 +47,7 @@ func newTranslationAgentWorker(id string) *translationAgentWorker {
 	return &translationAgentWorker{
 		id:       id,
 		provider: newOpenAIChatProvider(llmBaseURL, llmAPIKey, llmModel, providerClient),
-		client:   newPaperHTTPClient(),
+		client:   newRemoteSourceClient(90 * time.Second),
 		extract:  extractPDFWithPdftotext,
 	}
 }
@@ -57,7 +57,10 @@ func runTranslationWorker(ctx context.Context, once bool) error {
 	if err != nil {
 		return err
 	}
-	worker := newTranslationAgentWorker("translation-" + id)
+	return runTranslationAgent(ctx, once, newTranslationAgentWorker("translation-"+id))
+}
+
+func runTranslationAgent(ctx context.Context, once bool, worker *translationAgentWorker) error {
 	for {
 		job, err := claimTranslationJob(worker.id)
 		if errors.Is(err, sql.ErrNoRows) {
@@ -74,12 +77,18 @@ func runTranslationWorker(ctx context.Context, once bool) error {
 		if err != nil {
 			return err
 		}
-		if err := worker.process(ctx, job); err != nil {
-			if failErr := failTranslationJob(job.ID, worker.id, err); failErr != nil && !errors.Is(failErr, errTranslationLeaseLost) {
-				return fmt.Errorf("translation failed: %v; record failure: %w", err, failErr)
+		if processErr := worker.process(ctx, job); processErr != nil {
+			if ctx.Err() != nil && errors.Is(processErr, ctx.Err()) {
+				if releaseErr := releaseTranslationJob(job.ID, worker.id); releaseErr != nil && !errors.Is(releaseErr, errTranslationLeaseLost) {
+					return fmt.Errorf("translation stopped: %v; release job: %w", processErr, releaseErr)
+				}
+				return ctx.Err()
+			}
+			if failErr := failTranslationJob(job.ID, worker.id, processErr); failErr != nil && !errors.Is(failErr, errTranslationLeaseLost) {
+				return fmt.Errorf("translation failed: %v; record failure: %w", processErr, failErr)
 			}
 			if once {
-				return err
+				return processErr
 			}
 		}
 		if once {
@@ -89,69 +98,88 @@ func runTranslationWorker(ctx context.Context, once bool) error {
 }
 
 func (w *translationAgentWorker) process(ctx context.Context, job TranslationJob) error {
-	chunks, err := loadTranslationChunks(job.ID)
+	chunks, state, err := w.loadOrPrepareTranslation(ctx, &job)
 	if err != nil {
 		return err
 	}
-	if len(chunks) == 0 {
-		if err := updateTranslationStage(job.ID, w.id, "fetching", "fetching", 0, 0); err != nil {
-			return err
-		}
-		artifact, err := loadTranslationArtifact(job.ID)
-		if errors.Is(err, sql.ErrNoRows) {
-			artifact, err = withTranslationLeaseHeartbeat(ctx, job.ID, w.id, func(operationCtx context.Context) (paperArtifact, error) {
-				return fetchPaperPDF(operationCtx, w.client, job.Source)
-			})
-			if err == nil {
-				err = storeTranslationArtifact(job.ID, w.id, artifact)
-			}
-		}
-		if err != nil {
-			return err
-		}
-		if err := updateTranslationStage(job.ID, w.id, "extracting", "extracting", 0, 0); err != nil {
-			return err
-		}
-		text, err := withTranslationLeaseHeartbeat(ctx, job.ID, w.id, func(operationCtx context.Context) (string, error) {
-			return w.extract(operationCtx, artifact.Data)
+	usedModel, completed, err := w.translatePendingChunks(ctx, job, chunks, state)
+	if err != nil {
+		return err
+	}
+	return w.validateAndCompleteTranslation(job, chunks, usedModel, completed)
+}
+
+// loadOrPrepareTranslation owns the durable source-capture and extraction
+// phases. Existing chunks are the resume checkpoint and skip remote work.
+func (w *translationAgentWorker) loadOrPrepareTranslation(ctx context.Context, job *TranslationJob) ([]TranslationChunk, translationJobState, error) {
+	chunks, err := loadTranslationChunks(job.ID)
+	if err != nil {
+		return nil, "", err
+	}
+	if len(chunks) > 0 {
+		return chunks, translationClaimed, nil
+	}
+	if err := advanceTranslationStage(job.ID, w.id, translationClaimed, translationFetching, 0, 0); err != nil {
+		return nil, "", err
+	}
+	artifact, err := loadTranslationArtifact(job.ID)
+	if errors.Is(err, sql.ErrNoRows) {
+		artifact, err = withTranslationLeaseHeartbeat(ctx, job.ID, w.id, func(operationCtx context.Context) (paperArtifact, error) {
+			return fetchPaperPDF(operationCtx, w.client, job.Source)
 		})
-		if err != nil {
-			return fmt.Errorf("extract paper: %w", err)
-		}
-		text = strings.TrimSpace(text)
-		if text == "" {
-			return fmt.Errorf("extract paper: no text found")
-		}
-		if len(text) > maxExtractedPaperBytes {
-			return fmt.Errorf("extracted paper exceeds 32 MB")
-		}
-		if job.Source.Title == "" {
-			job.Source.Title = inferPaperTitle(text, job.Source.Identifier)
-			if _, err := db.Exec("UPDATE translation_jobs SET source_title=$1, updated_at=now() WHERE id=$2 AND lease_owner=$3",
-				job.Source.Title, job.ID, w.id); err != nil {
-				return err
-			}
-		}
-		if err := insertTranslationChunks(job.ID, chunkPaperText(text, translationChunkRunes)); err != nil {
-			return err
-		}
-		chunks, err = loadTranslationChunks(job.ID)
-		if err != nil {
-			return err
+		if err == nil {
+			err = storeTranslationArtifact(job.ID, w.id, artifact)
 		}
 	}
+	if err != nil {
+		return nil, "", err
+	}
+	if err := advanceTranslationStage(job.ID, w.id, translationFetching, translationExtracting, 0, 0); err != nil {
+		return nil, "", err
+	}
+	text, err := withTranslationLeaseHeartbeat(ctx, job.ID, w.id, func(operationCtx context.Context) (string, error) {
+		return w.extract(operationCtx, artifact.Data)
+	})
+	if err != nil {
+		return nil, "", fmt.Errorf("extract paper: %w", err)
+	}
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return nil, "", fmt.Errorf("extract paper: no text found")
+	}
+	if len(text) > maxExtractedPaperBytes {
+		return nil, "", fmt.Errorf("extracted paper exceeds 32 MB")
+	}
+	if job.Source.Title == "" {
+		job.Source.Title = inferPaperTitle(text, job.Source.Identifier)
+	}
+	sourceChunks := chunkPaperText(text, translationChunkRunes)
+	manifest := buildTranslationSourceManifest(artifact.Hash, sourceChunks)
+	if err := prepareTranslationChunks(job.ID, w.id, job.Source.Title, sourceChunks, manifest); err != nil {
+		return nil, "", err
+	}
+	job.SourceHash = artifact.Hash
+	job.SourceManifest = manifest
+	chunks, err = loadTranslationChunks(job.ID)
+	return chunks, translationExtracting, err
+}
 
+// translatePendingChunks owns resume-aware progress and chunk checkpoints.
+func (w *translationAgentWorker) translatePendingChunks(ctx context.Context, job TranslationJob, chunks []TranslationChunk, from translationJobState) (string, int, error) {
 	completed := 0
 	for _, chunk := range chunks {
 		if chunk.State == "complete" && strings.TrimSpace(chunk.TranslatedText) != "" {
 			completed++
 		}
 	}
-	if err := updateTranslationStage(job.ID, w.id, "translating", "translating", completed, len(chunks)); err != nil {
-		return err
+	if err := advanceTranslationStage(job.ID, w.id, from, translationTranslating, completed, len(chunks)); err != nil {
+		return "", completed, err
 	}
 
-	usedModel := translationModel
+	usedModel := job.Model
+	if usedModel == "" {
+		usedModel = translationModel
+	}
 	for index := range chunks {
 		if chunks[index].State == "complete" && strings.TrimSpace(chunks[index].TranslatedText) != "" {
 			continue
@@ -161,7 +189,7 @@ func (w *translationAgentWorker) process(ctx context.Context, job TranslationJob
 			return LLMResult{Content: translated, Model: model}, translateErr
 		})
 		if err != nil {
-			return err
+			return "", completed, err
 		}
 		chunks[index].TranslatedText = result.Content
 		chunks[index].State = "complete"
@@ -169,29 +197,41 @@ func (w *translationAgentWorker) process(ctx context.Context, job TranslationJob
 		if result.Model != "" {
 			usedModel = result.Model
 		}
+		chunkModel := result.Model
+		if chunkModel == "" {
+			chunkModel = usedModel
+		}
+		chunks[index].Provider = "openai-compatible"
+		chunks[index].Model = chunkModel
 		completed++
-		if err := completeTranslationChunk(job.ID, w.id, chunks[index], completed, len(chunks)); err != nil {
-			return err
+		if err := completeTranslationChunk(job.ID, w.id, chunks[index], chunkModel); err != nil {
+			return "", completed, err
 		}
 	}
+	return usedModel, completed, nil
+}
 
-	if err := updateTranslationStage(job.ID, w.id, "validating", "validating", completed, len(chunks)); err != nil {
+// validateAndCompleteTranslation owns the final validation -> durable draft
+// transition. No draft is stored until every integrity check passes.
+func (w *translationAgentWorker) validateAndCompleteTranslation(job TranslationJob, chunks []TranslationChunk, usedModel string, completed int) error {
+	if err := advanceTranslationStage(job.ID, w.id, translationTranslating, translationValidating, completed, len(chunks)); err != nil {
 		return err
 	}
-	report := validateTranslationChunks(chunks)
+	job.Provider = "openai-compatible"
+	job.Model = usedModel
+	markdown, slug := buildTranslationMarkdown(job, chunks)
+	report := newTranslationEvidenceGate().Validate(job, chunks, markdown)
 	if !report.Complete {
 		if err := storeFailedTranslationValidation(job.ID, w.id, report); err != nil {
 			return err
 		}
 		return fmt.Errorf("translation validation failed: %s", strings.Join(report.Issues, "; "))
 	}
-	job.Provider = "openai-compatible"
-	job.Model = usedModel
-	markdown, slug := buildTranslationMarkdown(job, chunks)
-	if err := publishDocument(parseDoc(slug, "", markdown)); err != nil {
-		return fmt.Errorf("store translation draft: %w", err)
+	draft := parseDoc(slug, "", markdown)
+	if err := completeTranslationDraft(job.ID, w.id, draft, job.Provider, job.Model, report); err != nil {
+		return fmt.Errorf("complete translation draft: %w", err)
 	}
-	return completeTranslationJob(job.ID, w.id, slug, job.Provider, job.Model, report)
+	return nil
 }
 
 func translatePaperChunk(ctx context.Context, provider LLMProvider, job TranslationJob, source string, ordinal, total int) (string, string, error) {
@@ -207,6 +247,9 @@ func translatePaperChunk(ctx context.Context, provider LLMProvider, job Translat
 	if err != nil {
 		return "", "", fmt.Errorf("translate chunk %d: %w", ordinal, err)
 	}
+	if result.FinishReason != "" && result.FinishReason != "stop" {
+		return "", result.Model, fmt.Errorf("translate chunk %d: incomplete provider response (%s)", ordinal, result.FinishReason)
+	}
 	translated := strings.TrimSpace(result.Content)
 	if translated == "" {
 		return "", result.Model, fmt.Errorf("translate chunk %d: empty result", ordinal)
@@ -214,46 +257,9 @@ func translatePaperChunk(ctx context.Context, provider LLMProvider, job Translat
 	return translated, result.Model, nil
 }
 
-func newPaperHTTPClient() *http.Client {
-	dialer := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
-	transport := http.DefaultTransport.(*http.Transport).Clone()
-	transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
-		host, port, err := net.SplitHostPort(address)
-		if err != nil {
-			return nil, err
-		}
-		addresses, err := net.DefaultResolver.LookupIPAddr(ctx, host)
-		if err != nil {
-			return nil, err
-		}
-		for _, candidate := range addresses {
-			if disallowedPaperIP(candidate.IP) {
-				continue
-			}
-			return dialer.DialContext(ctx, network, net.JoinHostPort(candidate.IP.String(), port))
-		}
-		return nil, fmt.Errorf("paper source resolved only to disallowed addresses")
-	}
-	client := &http.Client{Transport: transport, Timeout: 90 * time.Second}
-	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
-		if len(via) >= 5 {
-			return fmt.Errorf("too many redirects")
-		}
-		if req.URL.Scheme != "http" && req.URL.Scheme != "https" {
-			return fmt.Errorf("redirect uses unsupported scheme")
-		}
-		return nil
-	}
-	return client
-}
-
-func disallowedPaperIP(ip net.IP) bool {
-	return ip == nil || !ip.IsGlobalUnicast() || ip.IsPrivate() || ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast()
-}
-
-func fetchPaperPDF(ctx context.Context, client *http.Client, source PaperSource) (paperArtifact, error) {
+func fetchPaperPDF(ctx context.Context, client *remoteSourceClient, source PaperSource) (paperArtifact, error) {
 	parsed, err := url.Parse(source.ArtifactURL)
-	if err != nil || parsed.Host == "" || parsed.User != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+	if err != nil || validateRemoteSourceURL(parsed) != nil {
 		return paperArtifact{}, fmt.Errorf("invalid paper artifact URL")
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, parsed.String(), nil)
@@ -268,17 +274,36 @@ func fetchPaperPDF(ctx context.Context, client *http.Client, source PaperSource)
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		io.Copy(io.Discard, io.LimitReader(resp.Body, 4<<10))
+		if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+			return paperArtifact{}, fmt.Errorf("%w: source requires authorization", errPaperNeedsInput)
+		}
 		return paperArtifact{}, fmt.Errorf("fetch paper: http status %d", resp.StatusCode)
 	}
-	data, err := io.ReadAll(io.LimitReader(resp.Body, maxTranslationPDFBytes+1))
+	data, err := readRemoteSourceBody(resp.Body, maxTranslationPDFBytes)
 	if err != nil {
 		return paperArtifact{}, fmt.Errorf("fetch paper body: %w", err)
 	}
-	if int64(len(data)) > maxTranslationPDFBytes {
-		return paperArtifact{}, fmt.Errorf("paper PDF exceeds 50 MB")
-	}
-	if !bytes.HasPrefix(data, []byte("%PDF-")) {
+	artifact, err := paperArtifactFromPDF(data)
+	if err != nil {
 		return paperArtifact{}, fmt.Errorf("%w: source did not return a PDF", errPaperNeedsInput)
+	}
+	return artifact, nil
+}
+
+func paperArtifactFromPDF(data []byte) (paperArtifact, error) {
+	if int64(len(data)) > maxTranslationPDFBytes {
+		return paperArtifact{}, fmt.Errorf("%w: file exceeds 50 MB", errInvalidPaperPDF)
+	}
+	if len(data) < 8 || !bytes.HasPrefix(data, []byte("%PDF-")) ||
+		(data[5] != '1' && data[5] != '2') || data[6] != '.' || data[7] < '0' || data[7] > '9' {
+		return paperArtifact{}, fmt.Errorf("%w: missing PDF signature", errInvalidPaperPDF)
+	}
+	trailer := data
+	if len(trailer) > 2048 {
+		trailer = trailer[len(trailer)-2048:]
+	}
+	if !bytes.Contains(trailer, []byte("%%EOF")) {
+		return paperArtifact{}, fmt.Errorf("%w: incomplete PDF trailer", errInvalidPaperPDF)
 	}
 	hash := sha256.Sum256(data)
 	return paperArtifact{Hash: fmt.Sprintf("%x", hash[:]), MIME: "application/pdf", Data: data}, nil
@@ -392,8 +417,10 @@ func storeTranslationArtifact(jobID, workerID string, artifact paperArtifact) er
 		VALUES ($1,$2,$3) ON CONFLICT (hash) DO NOTHING`, artifact.Hash, artifact.MIME, artifact.Data); err != nil {
 		return err
 	}
-	result, err := tx.Exec(`UPDATE translation_jobs SET source_hash=$1, source_artifact_hash=$1, updated_at=now()
-		WHERE id=$2 AND lease_owner=$3`, artifact.Hash, jobID, workerID)
+	result, err := tx.Exec(`UPDATE translation_jobs
+		SET source_hash=$1, source_artifact_hash=$1, source_content_key=$2, updated_at=now()
+		WHERE id=$3 AND lease_owner=$4 AND state='fetching' AND lease_until > now()`,
+		artifact.Hash, "sha256:"+artifact.Hash, jobID, workerID)
 	if err != nil {
 		return err
 	}
@@ -405,12 +432,35 @@ func storeTranslationArtifact(jobID, workerID string, artifact paperArtifact) er
 	return tx.Commit()
 }
 
-func insertTranslationChunks(jobID string, sourceChunks []string) error {
+// prepareTranslationChunks owns the extracting-stage checkpoint. Source
+// metadata and every chunk commit together under the active worker lease, so
+// cancellation or lease loss cannot leave a partially prepared job.
+func prepareTranslationChunks(jobID, workerID, sourceTitle string, sourceChunks []string, manifest TranslationSourceManifest) error {
+	manifestJSON, err := json.Marshal(manifest)
+	if err != nil {
+		return err
+	}
 	tx, err := db.Begin()
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
+	result, err := tx.Exec(`UPDATE translation_jobs
+		SET source_title=CASE WHEN source_title='' THEN $1 ELSE source_title END,
+		    progress_total=$2, source_manifest=$3,
+		    lease_until=now()+interval '2 minutes', updated_at=now()
+		WHERE id=$4 AND lease_owner=$5 AND state='extracting' AND lease_until > now()`,
+		sourceTitle, len(sourceChunks), manifestJSON, jobID, workerID)
+	if err != nil {
+		return err
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows != 1 {
+		return errTranslationLeaseLost
+	}
 	for ordinal, source := range sourceChunks {
 		if _, err := tx.Exec(`INSERT INTO translation_chunks (job_id, ordinal, source_text, source_hash)
 			VALUES ($1,$2,$3,$4) ON CONFLICT (job_id, ordinal) DO NOTHING`,
@@ -422,7 +472,7 @@ func insertTranslationChunks(jobID string, sourceChunks []string) error {
 }
 
 func loadTranslationChunks(jobID string) ([]TranslationChunk, error) {
-	rows, err := db.Query(`SELECT ordinal, source_text, source_hash, translated_text, state, attempts
+	rows, err := db.Query(`SELECT ordinal, source_text, source_hash, translated_text, state, attempts, provider, model
 		FROM translation_chunks WHERE job_id=$1 ORDER BY ordinal`, jobID)
 	if err != nil {
 		return nil, err
@@ -432,7 +482,7 @@ func loadTranslationChunks(jobID string) ([]TranslationChunk, error) {
 	for rows.Next() {
 		var chunk TranslationChunk
 		if err := rows.Scan(&chunk.Ordinal, &chunk.SourceText, &chunk.SourceHash,
-			&chunk.TranslatedText, &chunk.State, &chunk.Attempts); err != nil {
+			&chunk.TranslatedText, &chunk.State, &chunk.Attempts, &chunk.Provider, &chunk.Model); err != nil {
 			return nil, err
 		}
 		chunks = append(chunks, chunk)
@@ -440,11 +490,12 @@ func loadTranslationChunks(jobID string) ([]TranslationChunk, error) {
 	return chunks, rows.Err()
 }
 
-func updateTranslationStage(jobID, workerID, state, stage string, current, total int) error {
+func advanceTranslationStage(jobID, workerID string, from, to translationJobState, current, total int) error {
 	result, err := db.Exec(`UPDATE translation_jobs
 		SET state=$1, stage=$2, progress_current=$3, progress_total=$4,
 		    lease_until=now()+interval '2 minutes', updated_at=now()
-		WHERE id=$5 AND lease_owner=$6`, state, stage, current, total, jobID, workerID)
+		WHERE id=$5 AND lease_owner=$6 AND state=$7 AND lease_until > now()`,
+		string(to), string(to), current, total, jobID, workerID, string(from))
 	if err != nil {
 		return err
 	}
@@ -458,20 +509,24 @@ func updateTranslationStage(jobID, workerID, state, stage string, current, total
 	return nil
 }
 
-func completeTranslationChunk(jobID, workerID string, chunk TranslationChunk, current, total int) error {
+func completeTranslationChunk(jobID, workerID string, chunk TranslationChunk, model string) error {
 	tx, err := db.Begin()
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
 	if _, err := tx.Exec(`UPDATE translation_chunks
-		SET translated_text=$1, state='complete', attempts=attempts+1, updated_at=now()
-		WHERE job_id=$2 AND ordinal=$3`, chunk.TranslatedText, jobID, chunk.Ordinal); err != nil {
+		SET translated_text=$1, state='complete', attempts=attempts+1,
+		    provider='openai-compatible', model=$2, updated_at=now()
+		WHERE job_id=$3 AND ordinal=$4`, chunk.TranslatedText, model, jobID, chunk.Ordinal); err != nil {
 		return err
 	}
 	result, err := tx.Exec(`UPDATE translation_jobs
-		SET progress_current=$1, progress_total=$2, lease_until=now()+interval '2 minutes', updated_at=now()
-		WHERE id=$3 AND lease_owner=$4`, current, total, jobID, workerID)
+		SET progress_current=(SELECT count(*) FROM translation_chunks WHERE job_id=$1 AND state='complete'),
+		    progress_total=(SELECT count(*) FROM translation_chunks WHERE job_id=$1),
+		    provider='openai-compatible', model=CASE WHEN $3<>'' THEN $3 ELSE model END,
+		    lease_until=now()+interval '2 minutes', updated_at=now()
+		WHERE id=$1 AND lease_owner=$2 AND state='translating' AND lease_until > now()`, jobID, workerID, model)
 	if err != nil {
 		return err
 	}
@@ -485,26 +540,43 @@ func completeTranslationChunk(jobID, workerID string, chunk TranslationChunk, cu
 	return tx.Commit()
 }
 
-func completeTranslationJob(jobID, workerID, slug, provider, model string, report TranslationValidationReport) error {
+// completeTranslationDraft owns the validating -> draft_ready transition.
+// The draft and job state commit together so callers can never observe one
+// without the other. Runtime projections are updated only after the durable
+// transaction succeeds.
+func completeTranslationDraft(jobID, workerID string, draft *Document, provider, model string, report TranslationValidationReport) error {
 	reportJSON, err := json.Marshal(report)
 	if err != nil {
 		return err
 	}
-	result, err := db.Exec(`UPDATE translation_jobs
-		SET state='draft_ready', stage='draft_ready', output_slug=$1, provider=$2, model=$3,
-		    validation_report=$4, error_summary='', lease_owner='', lease_until=NULL, updated_at=now()
-		WHERE id=$5 AND lease_owner=$6`, slug, provider, model, reportJSON, jobID, workerID)
-	if err != nil {
-		return err
-	}
-	rows, err := result.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if rows != 1 {
-		return errTranslationLeaseLost
-	}
-	return nil
+	return commitAndProjectDocument(func() (*Document, error) {
+		tx, err := db.Begin()
+		if err != nil {
+			return nil, err
+		}
+		defer tx.Rollback()
+		if err := upsertDocumentTx(tx, draft); err != nil {
+			return nil, err
+		}
+		result, err := tx.Exec(`UPDATE translation_jobs
+			SET state='draft_ready', stage='draft_ready', output_slug=$1, provider=$2, model=$3,
+			    validation_report=$4, error_summary='', lease_owner='', lease_until=NULL, updated_at=now()
+			WHERE id=$5 AND lease_owner=$6 AND state='validating' AND lease_until > now()`, draft.Slug, provider, model, reportJSON, jobID, workerID)
+		if err != nil {
+			return nil, err
+		}
+		rows, err := result.RowsAffected()
+		if err != nil {
+			return nil, err
+		}
+		if rows != 1 {
+			return nil, errTranslationLeaseLost
+		}
+		if err := tx.Commit(); err != nil {
+			return nil, err
+		}
+		return draft, nil
+	})
 }
 
 func storeFailedTranslationValidation(jobID, workerID string, report TranslationValidationReport) error {
@@ -519,13 +591,14 @@ func storeFailedTranslationValidation(jobID, workerID string, report Translation
 	defer tx.Rollback()
 	for _, ordinal := range report.InvalidChunks {
 		if _, err := tx.Exec(`UPDATE translation_chunks
-			SET translated_text='', state='pending', updated_at=now()
+			SET translated_text='', state='pending', provider='', model='', updated_at=now()
 			WHERE job_id=$1 AND ordinal=$2`, jobID, ordinal); err != nil {
 			return err
 		}
 	}
 	result, err := tx.Exec(`UPDATE translation_jobs
-		SET validation_report=$1, updated_at=now() WHERE id=$2 AND lease_owner=$3`,
+		SET validation_report=$1, updated_at=now()
+		WHERE id=$2 AND lease_owner=$3 AND state='validating' AND lease_until > now()`,
 		reportJSON, jobID, workerID)
 	if err != nil {
 		return err
@@ -548,7 +621,29 @@ func failTranslationJob(jobID, workerID string, cause error) error {
 	result, err := db.Exec(`UPDATE translation_jobs
 		SET state=$1, stage=$1, error_summary=$2,
 		    lease_owner='', lease_until=NULL, updated_at=now()
-		WHERE id=$3 AND lease_owner=$4`, state, truncateRunes(cause.Error(), 500), jobID, workerID)
+		WHERE id=$3 AND lease_owner=$4 AND lease_until > now()
+		  AND state IN ('claimed','fetching','extracting','translating','validating')`, state, truncateRunes(cause.Error(), 500), jobID, workerID)
+	if err != nil {
+		return err
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows != 1 {
+		return errTranslationLeaseLost
+	}
+	return nil
+}
+
+// releaseTranslationJob makes an interrupted attempt immediately claimable
+// without turning a process shutdown into a business failure. Persisted stage,
+// artifact, and chunks remain the resume checkpoint.
+func releaseTranslationJob(jobID, workerID string) error {
+	result, err := db.Exec(`UPDATE translation_jobs
+		SET state='queued', lease_owner='', lease_until=NULL, updated_at=now()
+		WHERE id=$1 AND lease_owner=$2
+		  AND state IN ('claimed','fetching','extracting','translating','validating')`, jobID, workerID)
 	if err != nil {
 		return err
 	}
@@ -596,6 +691,7 @@ func renewTranslationLease(ctx context.Context, jobID, workerID string) error {
 	result, err := db.ExecContext(ctx, `UPDATE translation_jobs
 		SET lease_until=now()+interval '2 minutes', updated_at=now()
 		WHERE id=$1 AND lease_owner=$2
+		  AND lease_until > now()
 		  AND state IN ('claimed','fetching','extracting','translating','validating')`, jobID, workerID)
 	if err != nil {
 		return err

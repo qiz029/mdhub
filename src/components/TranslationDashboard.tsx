@@ -6,7 +6,7 @@ import { useEffect, useState } from "react";
 import {
   translationProgress,
   translationStageLabel,
-  type PaperSource,
+  type TranslationSourceCapture,
   type TranslationJob,
 } from "@/lib/translations";
 
@@ -22,7 +22,7 @@ function fmtDate(ms: number): string {
 export function TranslationDashboard() {
   const router = useRouter();
   const [sourceInput, setSourceInput] = useState("");
-  const [preview, setPreview] = useState<PaperSource | null>(null);
+  const [preview, setPreview] = useState<TranslationSourceCapture | null>(null);
   const [jobs, setJobs] = useState<TranslationJob[]>([]);
   const [loading, setLoading] = useState(true);
   const [resolving, setResolving] = useState(false);
@@ -61,9 +61,9 @@ export function TranslationDashboard() {
         body: JSON.stringify({ source }),
       });
       const result = (await response.json().catch(() => ({}))) as
-        | PaperSource
+        | TranslationSourceCapture
         | { error?: string };
-      if (!response.ok || !("kind" in result)) {
+      if (!response.ok || !("capture_id" in result)) {
         throw new Error("error" in result && result.error ? result.error : "无法识别论文地址");
       }
       setPreview(result);
@@ -76,6 +76,14 @@ export function TranslationDashboard() {
 
   async function createJob() {
     if (!preview || creating) return;
+    if (preview.revision_conflict) {
+      setError("同一来源版本返回了不同 PDF 内容，请核对论文版本后重新识别。");
+      return;
+    }
+    if (preview.existing_job_id) {
+      router.push(`/translations/${preview.existing_job_id}`);
+      return;
+    }
     setCreating(true);
     setError("");
     try {
@@ -83,7 +91,7 @@ export function TranslationDashboard() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          source: preview.input,
+          capture_id: preview.capture_id,
           target_language: "zh-CN",
           profile: "paper-translate-v1",
         }),
@@ -140,33 +148,52 @@ export function TranslationDashboard() {
               <div className="min-w-0">
                 <div className="flex items-center gap-2">
                   <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[11px] font-semibold uppercase text-amber-700">
-                    {preview.kind}
+                    {preview.source.kind}
                   </span>
-                  {preview.version && <span className="text-xs text-stone-400">{preview.version}</span>}
+                  {preview.source.version && <span className="text-xs text-stone-400">{preview.source.version}</span>}
+                  <span className="text-xs text-stone-400">
+                    {preview.status === "captured"
+                      ? `已验证 PDF · ${(preview.size_bytes / 1024 / 1024).toFixed(1)} MB`
+                      : "需要上传 PDF"}
+                  </span>
                 </div>
                 <p className="mt-2 break-all text-sm font-medium text-stone-800">
-                  {preview.title || preview.identifier || preview.canonical_url}
+                  {preview.source.title || preview.source.identifier || preview.source.canonical_url}
                 </p>
                 <a
-                  href={preview.canonical_url}
+                  href={preview.source.canonical_url}
                   target="_blank"
                   rel="noreferrer"
                   className="mt-1 block truncate text-xs text-stone-400 hover:text-stone-700"
                 >
-                  {preview.canonical_url}
+                  {preview.source.canonical_url}
                 </a>
+                {preview.previous_job_id && (
+                  <p className="mt-2 text-xs text-amber-700">
+                    检测到同一来源的旧版本任务；当前捕获会作为新版本单独创建。
+                  </p>
+                )}
+                {preview.revision_conflict && (
+                  <p className="mt-2 text-xs font-medium text-red-600">
+                    同一版本的 PDF 内容与已有任务不一致，已阻止重复翻译。
+                  </p>
+                )}
               </div>
               <button
                 type="button"
                 onClick={createJob}
-                disabled={creating}
+                disabled={creating || preview.revision_conflict}
                 className="min-h-11 shrink-0 rounded-lg bg-[var(--accent)] px-5 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-40"
               >
                 {creating
                   ? "提交中…"
-                  : preview.kind === "web"
-                    ? "交给 Agent 检查并翻译"
-                    : "交给 Agent 完整翻译"}
+                  : preview.revision_conflict
+                    ? "来源版本冲突"
+                    : preview.existing_job_id
+                    ? "查看已有任务"
+                    : preview.status === "needs_input"
+                      ? "创建任务并上传 PDF"
+                      : "交给 Agent 完整翻译"}
               </button>
             </div>
           </div>

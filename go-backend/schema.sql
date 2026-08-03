@@ -123,6 +123,28 @@ CREATE TABLE IF NOT EXISTS translation_artifacts (
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+CREATE TABLE IF NOT EXISTS translation_source_captures (
+    id                TEXT PRIMARY KEY,
+    source_input      TEXT NOT NULL,
+    source_kind       TEXT NOT NULL,
+    canonical_url     TEXT NOT NULL,
+    artifact_url      TEXT NOT NULL,
+    source_identifier TEXT NOT NULL DEFAULT '',
+    source_version    TEXT NOT NULL DEFAULT '',
+    source_title      TEXT NOT NULL DEFAULT '',
+    series_key        TEXT NOT NULL,
+    revision_key      TEXT NOT NULL,
+    content_key       TEXT NOT NULL DEFAULT '',
+    artifact_hash     TEXT REFERENCES translation_artifacts(hash),
+    status            TEXT NOT NULL CHECK (status IN ('captured', 'needs_input')),
+    size_bytes        BIGINT NOT NULL DEFAULT 0 CHECK (size_bytes >= 0),
+    created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+    expires_at        TIMESTAMPTZ NOT NULL DEFAULT now() + interval '24 hours'
+);
+
+ALTER TABLE translation_source_captures
+    ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ NOT NULL DEFAULT now() + interval '24 hours';
+
 CREATE TABLE IF NOT EXISTS translation_jobs (
     id               TEXT PRIMARY KEY,
     source_input     TEXT NOT NULL,
@@ -151,6 +173,23 @@ CREATE TABLE IF NOT EXISTS translation_jobs (
     updated_at       TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+ALTER TABLE translation_jobs ADD COLUMN IF NOT EXISTS source_manifest JSONB;
+ALTER TABLE translation_jobs ADD COLUMN IF NOT EXISTS source_capture_id TEXT REFERENCES translation_source_captures(id);
+ALTER TABLE translation_jobs ADD COLUMN IF NOT EXISTS source_series_key TEXT NOT NULL DEFAULT '';
+ALTER TABLE translation_jobs ADD COLUMN IF NOT EXISTS source_revision_key TEXT NOT NULL DEFAULT '';
+ALTER TABLE translation_jobs ADD COLUMN IF NOT EXISTS source_content_key TEXT NOT NULL DEFAULT '';
+
+CREATE UNIQUE INDEX IF NOT EXISTS translation_jobs_active_revision_idx
+    ON translation_jobs (source_revision_key, target_language, profile)
+    WHERE source_revision_key <> '' AND state <> 'cancelled';
+
+CREATE UNIQUE INDEX IF NOT EXISTS translation_jobs_active_content_idx
+    ON translation_jobs (source_content_key, target_language, profile)
+    WHERE source_content_key <> '' AND state <> 'cancelled';
+
+CREATE INDEX IF NOT EXISTS translation_source_captures_expiry_idx
+    ON translation_source_captures (expires_at);
+
 CREATE INDEX IF NOT EXISTS translation_jobs_claim_idx
     ON translation_jobs (state, lease_until, created_at);
 
@@ -162,6 +201,17 @@ CREATE TABLE IF NOT EXISTS translation_chunks (
     translated_text TEXT NOT NULL DEFAULT '',
     state           TEXT NOT NULL DEFAULT 'pending',
     attempts        INTEGER NOT NULL DEFAULT 0,
+    provider        TEXT NOT NULL DEFAULT '',
+    model           TEXT NOT NULL DEFAULT '',
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (job_id, ordinal)
 );
+
+ALTER TABLE translation_chunks ADD COLUMN IF NOT EXISTS provider TEXT NOT NULL DEFAULT '';
+ALTER TABLE translation_chunks ADD COLUMN IF NOT EXISTS model TEXT NOT NULL DEFAULT '';
+
+UPDATE translation_chunks AS chunk
+SET provider=job.provider, model=job.model
+FROM translation_jobs AS job
+WHERE chunk.job_id=job.id AND chunk.state='complete'
+  AND chunk.provider='' AND job.provider<>'';

@@ -24,10 +24,13 @@ package main
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
+	"net/url"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -37,7 +40,10 @@ const (
 	// a collision claims a strong connection, not a loose keyword cousin.
 	collisionSimThreshold = 0.55
 	collisionTopN         = 5
+	maxBountyAnswerRunes  = 8000
 )
+
+var errBountyNotOpen = errors.New("collision bounty is not open")
 
 var collideJobs = newKeyedJobQueue[string]("collide", 500)
 
@@ -393,9 +399,8 @@ func handleCollision(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]string{"status": "ok"})
 }
 
-// handleCollisionAnswer claims a collision's bounty question: the caller has
-// written a note answering it, and the collision records that note's slug.
-// Re-answering overwrites the previous claim. POST only.
+// handleCollisionAnswer turns a user answer into a published note and closes
+// the bounty in one durable transition. POST only.
 func handleCollisionAnswer(w http.ResponseWriter, r *http.Request, id string) {
 	if r.Method != http.MethodPost {
 		httpError(w, fmt.Errorf("method not allowed"), http.StatusMethodNotAllowed)
@@ -403,38 +408,118 @@ func handleCollisionAnswer(w http.ResponseWriter, r *http.Request, id string) {
 	}
 
 	var body struct {
-		Slug string `json:"slug"`
+		Answer string `json:"answer"`
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, maxCommentBodyBytes)
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&body); err != nil {
 		httpError(w, fmt.Errorf("invalid body"), http.StatusBadRequest)
 		return
 	}
-	body.Slug = strings.TrimSpace(body.Slug)
-	if body.Slug == "" {
-		httpError(w, fmt.Errorf("slug required"), http.StatusBadRequest)
+	body.Answer = strings.TrimSpace(body.Answer)
+	if body.Answer == "" {
+		httpError(w, fmt.Errorf("answer required"), http.StatusBadRequest)
 		return
 	}
-	var exists bool
-	if err := db.QueryRow("SELECT EXISTS(SELECT 1 FROM documents WHERE slug=$1)", body.Slug).Scan(&exists); err != nil {
-		httpError(w, err, http.StatusInternalServerError)
+	if len([]rune(body.Answer)) > maxBountyAnswerRunes {
+		httpError(w, fmt.Errorf("answer too long"), http.StatusBadRequest)
 		return
 	}
-	if !exists {
-		httpError(w, fmt.Errorf("unknown slug"), http.StatusBadRequest)
+	slug, err := claimCollisionBounty(id, body.Answer)
+	if errors.Is(err, sql.ErrNoRows) {
+		httpError(w, fmt.Errorf("not found"), http.StatusNotFound)
 		return
 	}
-
-	result, err := db.Exec("UPDATE collisions SET answered_by=$1, answered_at=now() WHERE id=$2", body.Slug, id)
+	if errors.Is(err, errBountyNotOpen) {
+		httpError(w, err, http.StatusConflict)
+		return
+	}
 	if err != nil {
 		httpError(w, err, http.StatusInternalServerError)
 		return
 	}
-	if updated, _ := result.RowsAffected(); updated == 0 {
-		httpError(w, fmt.Errorf("not found"), http.StatusNotFound)
-		return
+	writeJSON(w, map[string]string{"status": "ok", "slug": slug})
+}
+
+// claimCollisionBounty owns the complete answer transition. The collision is
+// locked before its open-state invariant is checked; document storage and the
+// answered_by update then commit together. Runtime projections happen only
+// after the transaction succeeds.
+func claimCollisionBounty(id, answer string) (string, error) {
+	if _, err := strconv.ParseInt(id, 10, 64); err != nil {
+		return "", sql.ErrNoRows
 	}
-	writeJSON(w, map[string]string{"status": "ok"})
+	var slug string
+	err := commitAndProjectDocument(func() (*Document, error) {
+		tx, err := db.Begin()
+		if err != nil {
+			return nil, err
+		}
+		defer tx.Rollback()
+		var slugA, slugB, question, verdict, answeredBy string
+		if err := tx.QueryRow(`SELECT slug_a, slug_b, question, verdict, answered_by
+			FROM collisions WHERE id=$1 FOR UPDATE`, id).
+			Scan(&slugA, &slugB, &question, &verdict, &answeredBy); err != nil {
+			return nil, err
+		}
+		if strings.TrimSpace(question) == "" || answeredBy != "" || verdict == "dismissed" {
+			return nil, errBountyNotOpen
+		}
+		suffix, err := randomID()
+		if err != nil {
+			return nil, err
+		}
+		slug = "_answers/" + id + "-" + suffix
+		doc := parseDoc(slug, "", bountyAnswerMarkdown(question, slugA, slugB, answer))
+		if err := upsertDocumentTx(tx, doc); err != nil {
+			return nil, err
+		}
+		result, err := tx.Exec(`UPDATE collisions SET answered_by=$1, answered_at=now()
+			WHERE id=$2 AND answered_by='' AND verdict<>'dismissed'`, slug, id)
+		if err != nil {
+			return nil, err
+		}
+		rows, err := result.RowsAffected()
+		if err != nil {
+			return nil, err
+		}
+		if rows != 1 {
+			return nil, errBountyNotOpen
+		}
+		if err := tx.Commit(); err != nil {
+			return nil, err
+		}
+		return doc, nil
+	})
+	if err != nil {
+		return "", err
+	}
+	return slug, nil
+}
+
+func bountyAnswerMarkdown(question, slugA, slugB, answer string) string {
+	titleQuestion := strings.Join(strings.Fields(question), " ")
+	titleTruncated := len([]rune(titleQuestion)) > 36
+	titleQuestion = truncateRunes(titleQuestion, 36)
+	if titleTruncated {
+		titleQuestion += "…"
+	}
+	return "---\n" +
+		"title: " + yamlQuote("答："+titleQuestion) + "\n" +
+		"publish: true\n" +
+		"---\n\n" +
+		"悬赏问题：" + strings.TrimSpace(question) + "\n\n" +
+		"相关笔记：[[" + bountyWikiTarget(slugA) + "]]、[[" + bountyWikiTarget(slugB) + "]]\n\n" +
+		strings.TrimSpace(answer) + "\n"
+}
+
+func bountyWikiTarget(slug string) string {
+	parts := strings.Split(slug, "/")
+	for index, part := range parts {
+		parts[index] = url.PathEscape(part)
+	}
+	return strings.Join(parts, "/")
 }
 
 // ---- daily blind box ----

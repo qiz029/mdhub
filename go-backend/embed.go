@@ -37,10 +37,17 @@ var (
 )
 
 const (
-	embeddingChunkRunes = 512
-	maxEmbeddingChunks  = 6
-	maxEmbeddingTitle   = 120
+	embeddingChunkRunes       = 512
+	maxEmbeddingChunks        = 6
+	maxEmbeddingTitle         = 120
+	embeddingRevisionAttempts = 3
 )
+
+type embeddingSource struct {
+	title    string
+	content  string
+	revision time.Time
+}
 
 // ---- vector codec ----
 
@@ -246,60 +253,94 @@ func waitEmbed() {
 // stored vector chains into the collision queue so collisions always run
 // against the new vector.
 func doEmbed(slug string, client *http.Client) error {
-	var title, content string
-	err := db.QueryRow(
-		"SELECT title, content FROM documents WHERE slug=$1 AND (published=true OR kind='fleeting')", slug).
-		Scan(&title, &content)
-	if err == sql.ErrNoRows {
-		if _, deleteErr := db.Exec("DELETE FROM embeddings WHERE slug=$1", slug); deleteErr != nil {
-			return fmt.Errorf("delete stale embedding: %w", deleteErr)
+	for attempt := 0; attempt < embeddingRevisionAttempts; attempt++ {
+		source, err := loadEmbeddingSource(slug)
+		if err == sql.ErrNoRows {
+			return removeEmbeddingProjection(slug)
 		}
-		mu.Lock()
-		delete(embedIndex, slug)
-		mu.Unlock()
-		markUniverseDirty()
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-
-	chunkVectors := make([][]float32, 0, maxEmbeddingChunks)
-	for _, chunk := range embeddingChunks(title, content) {
-		vector, err := embedText(client, chunk)
 		if err != nil {
 			return err
 		}
+
+		vec, err := embedSource(client, source)
+		if err != nil {
+			return err
+		}
+		stored, err := storeEmbeddingIfCurrent(slug, source.revision, vec)
+		if err != nil {
+			return err
+		}
+		if !stored {
+			continue
+		}
+		mu.Lock()
+		embedIndex[slug] = vec
+		mu.Unlock()
+		markUniverseDirty()
+		enqueueCollide(slug)
+		return nil
+	}
+	return fmt.Errorf("document %q changed during %d embedding attempts", slug, embeddingRevisionAttempts)
+}
+
+func loadEmbeddingSource(slug string) (embeddingSource, error) {
+	var source embeddingSource
+	err := db.QueryRow(
+		"SELECT title, content, file_mtime FROM documents WHERE slug=$1 AND (published=true OR kind='fleeting')", slug).
+		Scan(&source.title, &source.content, &source.revision)
+	return source, err
+}
+
+func embedSource(client *http.Client, source embeddingSource) ([]float32, error) {
+	chunkVectors := make([][]float32, 0, maxEmbeddingChunks)
+	for _, chunk := range embeddingChunks(source.title, source.content) {
+		vector, err := embedText(client, chunk)
+		if err != nil {
+			return nil, err
+		}
 		chunkVectors = append(chunkVectors, vector)
 	}
-	vec, err := meanEmbedding(chunkVectors)
-	if err != nil {
-		return err
-	}
+	return meanEmbedding(chunkVectors)
+}
 
-	if _, err := db.Exec(`
-		INSERT INTO embeddings (slug, embedding) VALUES ($1,$2)
+// storeEmbeddingIfCurrent fences the asynchronous result with the exact
+// document revision from which it was computed.
+func storeEmbeddingIfCurrent(slug string, revision time.Time, vec []float32) (bool, error) {
+	result, err := db.Exec(`
+		INSERT INTO embeddings (slug, embedding)
+		SELECT $1,$2 FROM documents
+		WHERE slug=$1 AND file_mtime=$3 AND (published=true OR kind='fleeting')
 		ON CONFLICT (slug) DO UPDATE SET embedding=EXCLUDED.embedding, updated_at=now()`,
-		slug, encodeVec(vec)); err != nil {
-		return err
+		slug, encodeVec(vec), revision)
+	if err != nil {
+		return false, err
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return rows == 1, nil
+}
+
+func removeEmbeddingProjection(slug string) error {
+	if _, err := db.Exec("DELETE FROM embeddings WHERE slug=$1", slug); err != nil {
+		return fmt.Errorf("delete stale embedding: %w", err)
 	}
 	mu.Lock()
-	embedIndex[slug] = vec
+	delete(embedIndex, slug)
 	mu.Unlock()
 	markUniverseDirty()
-	enqueueCollide(slug)
 	return nil
 }
 
-// loadEmbeddingsFromDB rebuilds the in-memory vector index from all
-// published documents and sparks that have a stored embedding.
-func loadEmbeddingsFromDB() {
+// readEmbeddingIndexFromDB builds a replacement vector snapshot without
+// mutating the active projection.
+func readEmbeddingIndexFromDB() (map[string][]float32, error) {
 	rows, err := db.Query(`
 		SELECT e.slug, e.embedding FROM embeddings e
 		JOIN documents d ON d.slug=e.slug AND (d.published=true OR d.kind='fleeting')`)
 	if err != nil {
-		log.Printf("load embeddings: %v", err)
-		return
+		return nil, fmt.Errorf("load embeddings: %w", err)
 	}
 	defer rows.Close()
 
@@ -308,22 +349,36 @@ func loadEmbeddingsFromDB() {
 		var slug string
 		var blob []byte
 		if err := rows.Scan(&slug, &blob); err != nil {
-			log.Printf("scan embedding index: %v", err)
-			return
+			return nil, fmt.Errorf("scan embedding index: %w", err)
 		}
 		if v := decodeVec(blob); v != nil {
 			newIndex[slug] = v
 		}
 	}
 	if err := rows.Err(); err != nil {
-		log.Printf("read embedding index: %v", err)
-		return
+		return nil, fmt.Errorf("read embedding index: %w", err)
+	}
+	return newIndex, nil
+}
+
+// reloadKnowledgeProjections atomically replaces both runtime indexes only
+// after both database snapshots have been built successfully.
+func reloadKnowledgeProjections() error {
+	newSearch, err := readSearchIndexFromDB()
+	if err != nil {
+		return err
+	}
+	newEmbeddings, err := readEmbeddingIndexFromDB()
+	if err != nil {
+		return err
 	}
 	mu.Lock()
-	embedIndex = newIndex
+	searchIndex = newSearch
+	embedIndex = newEmbeddings
 	mu.Unlock()
 	markUniverseDirty()
-	log.Printf("embedding index loaded, %d vectors", len(newIndex))
+	log.Printf("knowledge projections loaded, %d published docs, %d vectors", len(newSearch), len(newEmbeddings))
+	return nil
 }
 
 // ---- hybrid ranking ----

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"database/sql"
 	"database/sql/driver"
 	"math"
 	"net/http"
@@ -288,12 +289,13 @@ func TestDoEmbedChainsIntoCollisionQueue(t *testing.T) {
 	}))
 	t.Cleanup(server.Close)
 	embedBaseURL = server.URL
+	revision := time.Date(2026, 8, 3, 7, 0, 0, 0, time.UTC)
 	mock.ExpectQuery(regexp.QuoteMeta(
-		"SELECT title, content FROM documents WHERE slug=$1 AND (published=true OR kind='fleeting')")).
+		"SELECT title, content, file_mtime FROM documents WHERE slug=$1 AND (published=true OR kind='fleeting')")).
 		WithArgs("_sparks/1").
-		WillReturnRows(sqlmock.NewRows([]string{"title", "content"}).AddRow("Spark", "idea"))
+		WillReturnRows(sqlmock.NewRows([]string{"title", "content", "file_mtime"}).AddRow("Spark", "idea", revision))
 	mock.ExpectExec("INSERT INTO embeddings").
-		WithArgs("_sparks/1", sqlmock.AnyArg()).
+		WithArgs("_sparks/1", sqlmock.AnyArg(), revision).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 
 	if err := doEmbed("_sparks/1", server.Client()); err != nil {
@@ -451,19 +453,66 @@ func answerRequest(t *testing.T, path, body string) (*httptest.ResponseRecorder,
 }
 
 func TestHandleCollisionAnswer(t *testing.T) {
-	t.Run("claims the bounty", func(t *testing.T) {
+	expectStoredAnswer := func(mock sqlmock.Sqlmock, updateRows int64) {
+		mock.ExpectExec("INSERT INTO documents").WillReturnResult(sqlmock.NewResult(0, 1))
+		mock.ExpectExec(regexp.QuoteMeta("DELETE FROM document_tags WHERE slug=$1")).
+			WithArgs(sqlmock.AnyArg()).WillReturnResult(sqlmock.NewResult(0, 0))
+		mock.ExpectExec(regexp.QuoteMeta("DELETE FROM backlinks WHERE source_slug=$1")).
+			WithArgs(sqlmock.AnyArg()).WillReturnResult(sqlmock.NewResult(0, 0))
+		for _, slug := range []string{"notes/a", "_sparks/b"} {
+			mock.ExpectQuery(regexp.QuoteMeta("SELECT slug FROM documents WHERE slug=$1")).
+				WithArgs(slug).WillReturnRows(sqlmock.NewRows([]string{"slug"}).AddRow(slug))
+			mock.ExpectExec("INSERT INTO backlinks").
+				WithArgs(sqlmock.AnyArg(), slug).WillReturnResult(sqlmock.NewResult(0, 1))
+		}
+		mock.ExpectExec(regexp.QuoteMeta("DELETE FROM embeddings WHERE slug=$1")).
+			WithArgs(sqlmock.AnyArg()).WillReturnResult(sqlmock.NewResult(0, 0))
+		mock.ExpectExec("UPDATE collisions SET answered_by").
+			WithArgs(sqlmock.AnyArg(), "7").WillReturnResult(sqlmock.NewResult(0, updateRows))
+	}
+
+	t.Run("stores the answer and closes the bounty atomically", func(t *testing.T) {
 		mock := withMockDatabase(t)
-		mock.ExpectQuery(regexp.QuoteMeta("SELECT EXISTS(SELECT 1 FROM documents WHERE slug=$1)")).
-			WithArgs("notes/answer").
-			WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(true))
-		mock.ExpectExec(regexp.QuoteMeta("UPDATE collisions SET answered_by=$1, answered_at=now() WHERE id=$2")).
-			WithArgs("notes/answer", "7").
-			WillReturnResult(sqlmock.NewResult(0, 1))
-		response, request := answerRequest(t, "/api/collisions/7/answer", `{"slug":"notes/answer"}`)
+		isolatePublicationState(t)
+		mock.ExpectBegin()
+		mock.ExpectQuery("SELECT slug_a, slug_b, question, verdict, answered_by").
+			WithArgs("7").
+			WillReturnRows(sqlmock.NewRows([]string{"slug_a", "slug_b", "question", "verdict", "answered_by"}).
+				AddRow("notes/a", "_sparks/b", "两篇笔记共同预设了什么前提？", "new", ""))
+		expectStoredAnswer(mock, 1)
+		mock.ExpectCommit()
+		response, request := answerRequest(t, "/api/collisions/7/answer", `{"answer":"我的回答"}`)
 
 		handleCollision(response, request)
 
-		if response.Code != http.StatusOK {
+		if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"slug":"_answers/7-`) {
+			t.Fatalf("status = %d, body = %q", response.Code, response.Body.String())
+		}
+		searchable := false
+		mu.RLock()
+		for slug := range searchIndex {
+			searchable = searchable || strings.HasPrefix(slug, "_answers/7-")
+		}
+		mu.RUnlock()
+		if !searchable {
+			t.Fatal("committed answer was not projected into search")
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	t.Run("already answered bounty is a conflict", func(t *testing.T) {
+		mock := withMockDatabase(t)
+		mock.ExpectBegin()
+		mock.ExpectQuery("SELECT slug_a, slug_b, question, verdict, answered_by").
+			WithArgs("7").
+			WillReturnRows(sqlmock.NewRows([]string{"slug_a", "slug_b", "question", "verdict", "answered_by"}).
+				AddRow("notes/a", "_sparks/b", "question", "new", "_answers/old"))
+		mock.ExpectRollback()
+		response, request := answerRequest(t, "/api/collisions/7/answer", `{"answer":"second answer"}`)
+		handleCollision(response, request)
+		if response.Code != http.StatusConflict {
 			t.Fatalf("status = %d, body = %q", response.Code, response.Body.String())
 		}
 		if err := mock.ExpectationsWereMet(); err != nil {
@@ -471,48 +520,37 @@ func TestHandleCollisionAnswer(t *testing.T) {
 		}
 	})
 
-	t.Run("re-answering overwrites the previous claim", func(t *testing.T) {
+	t.Run("failed collision update rolls the staged document back", func(t *testing.T) {
 		mock := withMockDatabase(t)
-		for _, slug := range []string{"notes/first", "notes/second"} {
-			mock.ExpectQuery("SELECT EXISTS").
-				WithArgs(slug).
-				WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(true))
-			mock.ExpectExec("UPDATE collisions SET answered_by").
-				WithArgs(slug, "7").
-				WillReturnResult(sqlmock.NewResult(0, 1))
-		}
-		for _, slug := range []string{"notes/first", "notes/second"} {
-			response, request := answerRequest(t, "/api/collisions/7/answer", `{"slug":"`+slug+`"}`)
-			handleCollision(response, request)
-			if response.Code != http.StatusOK {
-				t.Fatalf("slug %s: status = %d, body = %q", slug, response.Code, response.Body.String())
-			}
-		}
-		if err := mock.ExpectationsWereMet(); err != nil {
-			t.Fatal(err)
-		}
-	})
-
-	t.Run("unknown slug is 400", func(t *testing.T) {
-		mock := withMockDatabase(t)
-		mock.ExpectQuery("SELECT EXISTS").
-			WithArgs("notes/ghost").
-			WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(false))
-		response, request := answerRequest(t, "/api/collisions/7/answer", `{"slug":"notes/ghost"}`)
+		isolatePublicationState(t)
+		mock.ExpectBegin()
+		mock.ExpectQuery("SELECT slug_a, slug_b, question, verdict, answered_by").
+			WithArgs("7").
+			WillReturnRows(sqlmock.NewRows([]string{"slug_a", "slug_b", "question", "verdict", "answered_by"}).
+				AddRow("notes/a", "_sparks/b", "question", "new", ""))
+		expectStoredAnswer(mock, 0)
+		mock.ExpectRollback()
+		response, request := answerRequest(t, "/api/collisions/7/answer", `{"answer":"answer"}`)
 
 		handleCollision(response, request)
 
-		if response.Code != http.StatusBadRequest {
-			t.Fatalf("status = %d, want 400", response.Code)
+		if response.Code != http.StatusConflict {
+			t.Fatalf("status = %d, body = %q", response.Code, response.Body.String())
+		}
+		mu.RLock()
+		projected := len(searchIndex)
+		mu.RUnlock()
+		if projected != 0 {
+			t.Fatal("rolled-back answer leaked into runtime projections")
 		}
 		if err := mock.ExpectationsWereMet(); err != nil {
 			t.Fatal(err)
 		}
 	})
 
-	t.Run("empty slug is 400", func(t *testing.T) {
+	t.Run("empty answer is 400", func(t *testing.T) {
 		withMockDatabase(t)
-		response, request := answerRequest(t, "/api/collisions/7/answer", `{"slug":"  "}`)
+		response, request := answerRequest(t, "/api/collisions/7/answer", `{"answer":"  "}`)
 		handleCollision(response, request)
 		if response.Code != http.StatusBadRequest {
 			t.Fatalf("status = %d, want 400", response.Code)
@@ -530,13 +568,11 @@ func TestHandleCollisionAnswer(t *testing.T) {
 
 	t.Run("unknown collision id is 404", func(t *testing.T) {
 		mock := withMockDatabase(t)
-		mock.ExpectQuery("SELECT EXISTS").
-			WithArgs("notes/answer").
-			WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(true))
-		mock.ExpectExec("UPDATE collisions SET answered_by").
-			WithArgs("notes/answer", "99").
-			WillReturnResult(sqlmock.NewResult(0, 0))
-		response, request := answerRequest(t, "/api/collisions/99/answer", `{"slug":"notes/answer"}`)
+		mock.ExpectBegin()
+		mock.ExpectQuery("SELECT slug_a, slug_b, question, verdict, answered_by").
+			WithArgs("99").WillReturnError(sql.ErrNoRows)
+		mock.ExpectRollback()
+		response, request := answerRequest(t, "/api/collisions/99/answer", `{"answer":"answer"}`)
 
 		handleCollision(response, request)
 
@@ -557,6 +593,19 @@ func TestHandleCollisionAnswer(t *testing.T) {
 			t.Fatalf("status = %d, want 405", response.Code)
 		}
 	})
+}
+
+func TestBountyAnswerMarkdownKeepsAuthorshipAndSafeBacklinks(t *testing.T) {
+	question := strings.Repeat("问", 40) + "\nnext line"
+	markdown := bountyAnswerMarkdown(question, "notes/a]", "notes/b|alias", "  我的回答  ")
+	if !strings.Contains(markdown, `title: "答：`+strings.Repeat("问", 36)+`…"`) {
+		t.Fatalf("title not safely truncated:\n%s", markdown)
+	}
+	for _, want := range []string{"publish: true", "[[notes/a%5D]]", "[[notes/b%7Calias]]", "我的回答\n"} {
+		if !strings.Contains(markdown, want) {
+			t.Fatalf("missing %q in:\n%s", want, markdown)
+		}
+	}
 }
 
 func TestHandleBlindbox(t *testing.T) {

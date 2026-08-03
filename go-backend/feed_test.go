@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -37,6 +38,13 @@ func stubPollFeedLater(t *testing.T) {
 	previous := pollFeedLater
 	pollFeedLater = func(string) {}
 	t.Cleanup(func() { pollFeedLater = previous })
+}
+
+func stubFeedHTTPClient(t *testing.T, client *http.Client) {
+	t.Helper()
+	previous := feedHTTPClient
+	feedHTTPClient = func() *remoteSourceClient { return &remoteSourceClient{http: client} }
+	t.Cleanup(func() { feedHTTPClient = previous })
 }
 
 func TestItemToSpark(t *testing.T) {
@@ -154,6 +162,7 @@ func TestPollFeed(t *testing.T) {
 		srv := feedServer(t, func(w http.ResponseWriter, r *http.Request) {
 			w.Write([]byte(rssFixture))
 		})
+		stubFeedHTTPClient(t, srv.Client())
 		f := feedRow{ID: 1, URL: srv.URL}
 		slug, _ := itemToSpark("Test Feed", srv.URL, "", &gofeed.Item{GUID: "urn:1", Title: "First Post"})
 
@@ -175,7 +184,7 @@ func TestPollFeed(t *testing.T) {
 			WithArgs(slug).WillReturnResult(sqlmock.NewResult(0, 1))
 		mock.ExpectCommit()
 
-		if err := pollFeed(f, srv.Client()); err != nil {
+		if err := pollFeed(f, &remoteSourceClient{http: srv.Client()}); err != nil {
 			t.Fatal(err)
 		}
 		if err := mock.ExpectationsWereMet(); err != nil {
@@ -196,7 +205,7 @@ func TestPollFeed(t *testing.T) {
 			WithArgs(int64(2)).
 			WillReturnResult(sqlmock.NewResult(0, 1))
 
-		if err := pollFeed(f, srv.Client()); err != nil {
+		if err := pollFeed(f, &remoteSourceClient{http: srv.Client()}); err != nil {
 			t.Fatal(err)
 		}
 		if err := mock.ExpectationsWereMet(); err != nil {
@@ -214,7 +223,7 @@ func TestPollFeed(t *testing.T) {
 			WithArgs("feed http status 500", int64(3)).
 			WillReturnResult(sqlmock.NewResult(0, 1))
 
-		err := pollFeed(f, srv.Client())
+		err := pollFeed(f, &remoteSourceClient{http: srv.Client()})
 		if err == nil || !strings.Contains(err.Error(), "500") {
 			t.Fatalf("err = %v, want http status error", err)
 		}
@@ -240,12 +249,22 @@ func TestFeedPollInterval(t *testing.T) {
 	if got := feedPollInterval(); got != 0 {
 		t.Fatalf("disabled interval = %v, want 0", got)
 	}
-	if startFeedPoller() {
+	if started, done := startFeedPoller(context.Background()); started {
 		t.Fatal("poller started despite MDHUB_FEED_INTERVAL=0")
+	} else {
+		<-done
 	}
 	feedInterval = "45m"
-	if !startFeedPoller() {
+	ctx, cancel := context.WithCancel(context.Background())
+	started, done := startFeedPoller(ctx)
+	if !started {
 		t.Fatal("poller did not start with a positive interval")
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("cancelled poller did not stop")
 	}
 }
 
@@ -284,6 +303,7 @@ func TestCreateFeed(t *testing.T) {
 		srv := feedServer(t, func(w http.ResponseWriter, r *http.Request) {
 			w.Write([]byte(rssFixture))
 		})
+		stubFeedHTTPClient(t, srv.Client())
 		mock.ExpectQuery("INSERT INTO feeds").
 			WithArgs(srv.URL, "Test Feed", "").
 			WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(int64(5)))
@@ -309,6 +329,7 @@ func TestCreateFeed(t *testing.T) {
 		srv := feedServer(t, func(w http.ResponseWriter, r *http.Request) {
 			w.Write([]byte(rssFixture))
 		})
+		stubFeedHTTPClient(t, srv.Client())
 		mock.ExpectQuery("INSERT INTO feeds").
 			WithArgs(srv.URL, "Test Feed", "魔兽世界， 关注团本机制设计").
 			WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(int64(6)))
@@ -331,6 +352,7 @@ func TestCreateFeed(t *testing.T) {
 		srv := feedServer(t, func(w http.ResponseWriter, r *http.Request) {
 			w.Write([]byte("this is not a feed"))
 		})
+		stubFeedHTTPClient(t, srv.Client())
 		request := httptest.NewRequest(http.MethodPost, "/api/feeds",
 			strings.NewReader(fmt.Sprintf(`{"url":%q}`, srv.URL)))
 		response := httptest.NewRecorder()
@@ -353,11 +375,23 @@ func TestCreateFeed(t *testing.T) {
 		}
 	})
 
+	t.Run("private destination is rejected by the production adapter", func(t *testing.T) {
+		withMockDatabase(t)
+		request := httptest.NewRequest(http.MethodPost, "/api/feeds",
+			strings.NewReader(`{"url":"http://169.254.169.254/latest/meta-data"}`))
+		response := httptest.NewRecorder()
+		handleFeeds(response, request)
+		if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), "remote source is not allowed") {
+			t.Fatalf("status=%d body=%q", response.Code, response.Body.String())
+		}
+	})
+
 	t.Run("duplicate url is 409", func(t *testing.T) {
 		mock := withMockDatabase(t)
 		srv := feedServer(t, func(w http.ResponseWriter, r *http.Request) {
 			w.Write([]byte(rssFixture))
 		})
+		stubFeedHTTPClient(t, srv.Client())
 		mock.ExpectQuery("INSERT INTO feeds").
 			WithArgs(srv.URL, "Test Feed", "").
 			WillReturnRows(sqlmock.NewRows([]string{"id"})) // ON CONFLICT DO NOTHING

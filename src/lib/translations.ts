@@ -1,6 +1,6 @@
 export type PaperSource = {
   input: string;
-  kind: "arxiv" | "pdf" | "web";
+  kind: "arxiv" | "doi" | "pdf" | "web";
   identifier?: string;
   version?: string;
   canonical_url: string;
@@ -8,11 +8,38 @@ export type PaperSource = {
   title?: string;
 };
 
+export type TranslationSourceCapture = {
+  capture_id: string;
+  source: PaperSource;
+  status: "captured" | "needs_input";
+  size_bytes: number;
+  existing_job_id?: string;
+  existing_output_slug?: string;
+  previous_job_id?: string;
+  revision_conflict?: boolean;
+};
+
 export type TranslationValidation = {
   complete: boolean;
   source_chunks: number;
   translated_chunks: number;
   issues: string[];
+  artifact_hash?: string;
+  manifest_hash?: string;
+  final_chunk_hash?: string;
+  profile?: string;
+  provider?: string;
+  model?: string;
+  source_url?: string;
+  source_version?: string;
+  chunk_provenance?: Array<{ ordinal: number; provider: string; model: string }>;
+};
+
+export type TranslationSourceManifest = {
+  artifact_hash: string;
+  chunk_count: number;
+  manifest_hash: string;
+  final_chunk_hash: string;
 };
 
 export type TranslationChunk = {
@@ -22,6 +49,8 @@ export type TranslationChunk = {
   translated_text: string;
   state: string;
   attempts: number;
+  provider?: string;
+  model?: string;
 };
 
 export type TranslationJob = {
@@ -36,6 +65,8 @@ export type TranslationJob = {
   output_slug?: string;
   provider?: string;
   model?: string;
+  source_hash?: string;
+  source_manifest?: TranslationSourceManifest;
   validation?: TranslationValidation;
   error?: string;
   created_at: number;

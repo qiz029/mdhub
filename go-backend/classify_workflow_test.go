@@ -3,6 +3,7 @@ package main
 import (
 	"regexp"
 	"testing"
+	"time"
 
 	"github.com/DATA-DOG/go-sqlmock"
 )
@@ -18,11 +19,12 @@ func categoryPathRows(paths ...string) *sqlmock.Rows {
 func TestDoInsertDescendsAndStoresChosenCategory(t *testing.T) {
 	mock := withMockDatabase(t)
 	server := fakeLLM(t, 200, "技术")
-	mock.ExpectQuery("SELECT title, content, category_path, category_manual").
+	revision := time.Date(2026, 8, 3, 7, 0, 0, 0, time.UTC)
+	mock.ExpectQuery("SELECT title, content, category_path, category_manual, file_mtime").
 		WithArgs("note").
 		WillReturnRows(sqlmock.NewRows([]string{
-			"title", "content", "category_path", "category_manual",
-		}).AddRow("Go testing", "content", "", false))
+			"title", "content", "category_path", "category_manual", "file_mtime",
+		}).AddRow("Go testing", "content", "", false, revision))
 	// The root has one child folder, so the LLM chooses it.
 	mock.ExpectQuery(regexp.QuoteMeta("SELECT category_path FROM documents WHERE published")).
 		WillReturnRows(categoryPathRows("技术/已有"))
@@ -30,7 +32,7 @@ func TestDoInsertDescendsAndStoresChosenCategory(t *testing.T) {
 	mock.ExpectQuery(regexp.QuoteMeta("SELECT category_path FROM documents WHERE published")).
 		WillReturnRows(categoryPathRows("技术"))
 	mock.ExpectExec("UPDATE documents SET category_path").
-		WithArgs("技术", "note").
+		WithArgs("技术", "note", revision, "").
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	// The final node is below the split threshold.
 	mock.ExpectQuery(regexp.QuoteMeta("SELECT category_path FROM documents WHERE published")).
@@ -55,11 +57,11 @@ func TestDoInsertSkipsPinnedOrAlreadyPlacedDocument(t *testing.T) {
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			mock := withMockDatabase(t)
-			mock.ExpectQuery("SELECT title, content, category_path, category_manual").
+			mock.ExpectQuery("SELECT title, content, category_path, category_manual, file_mtime").
 				WithArgs("note").
 				WillReturnRows(sqlmock.NewRows([]string{
-					"title", "content", "category_path", "category_manual",
-				}).AddRow("title", "content", row.path, row.manual))
+					"title", "content", "category_path", "category_manual", "file_mtime",
+				}).AddRow("title", "content", row.path, row.manual, time.Now()))
 			if err := doInsert("note", nil); err != nil {
 				t.Fatal(err)
 			}
@@ -67,6 +69,27 @@ func TestDoInsertSkipsPinnedOrAlreadyPlacedDocument(t *testing.T) {
 				t.Fatal(err)
 			}
 		})
+	}
+}
+
+func TestDoClassifyDoesNotOverwriteChangedDocument(t *testing.T) {
+	mock := withMockDatabase(t)
+	revision := time.Date(2026, 8, 3, 7, 0, 0, 0, time.UTC)
+	mock.ExpectQuery("SELECT title, content, category_path, category_manual, file_mtime").WithArgs("note").
+		WillReturnRows(sqlmock.NewRows([]string{
+			"title", "content", "category_path", "category_manual", "file_mtime",
+		}).AddRow("Title", "content", "Existing", false, revision))
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT category_path FROM documents WHERE published")).
+		WillReturnRows(categoryPathRows())
+	mock.ExpectExec("UPDATE documents SET category_path").
+		WithArgs("", "note", revision, "Existing").
+		WillReturnResult(sqlmock.NewResult(0, 0))
+
+	if err := doClassify("note", true, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
 	}
 }
 

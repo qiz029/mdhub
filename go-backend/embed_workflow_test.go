@@ -5,9 +5,11 @@ import (
 	"math"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/DATA-DOG/go-sqlmock"
 )
@@ -23,11 +25,12 @@ func TestDoEmbedStoresAndPublishesFreshVector(t *testing.T) {
 	}))
 	t.Cleanup(server.Close)
 	embedBaseURL = server.URL
-	mock.ExpectQuery("SELECT title, content FROM documents").
+	revision := time.Date(2026, 8, 3, 7, 0, 0, 0, time.UTC)
+	mock.ExpectQuery("SELECT title, content, file_mtime FROM documents").
 		WithArgs("note").
-		WillReturnRows(sqlmock.NewRows([]string{"title", "content"}).AddRow("Title", "Body"))
+		WillReturnRows(sqlmock.NewRows([]string{"title", "content", "file_mtime"}).AddRow("Title", "Body", revision))
 	mock.ExpectExec("INSERT INTO embeddings").
-		WithArgs("note", sqlmock.AnyArg()).
+		WithArgs("note", sqlmock.AnyArg(), revision).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	generation := universeVectorGeneration.Load()
 
@@ -52,7 +55,7 @@ func TestDoEmbedDeletesVectorForUnpublishedDocument(t *testing.T) {
 	mock := withMockDatabase(t)
 	isolatePublicationState(t)
 	embedIndex["draft"] = []float32{1}
-	mock.ExpectQuery("SELECT title, content FROM documents").
+	mock.ExpectQuery("SELECT title, content, file_mtime FROM documents").
 		WithArgs("draft").
 		WillReturnError(sql.ErrNoRows)
 	mock.ExpectExec(regexp.QuoteMeta("DELETE FROM embeddings WHERE slug=$1")).
@@ -73,23 +76,60 @@ func TestDoEmbedDeletesVectorForUnpublishedDocument(t *testing.T) {
 	}
 }
 
-func TestLoadEmbeddingsFromDBReplacesProjection(t *testing.T) {
+func TestDoEmbedRetriesWhenDocumentRevisionChanges(t *testing.T) {
 	mock := withMockDatabase(t)
 	isolatePublicationState(t)
-	embedIndex["old"] = []float32{9}
+	var calls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls++
+		if calls == 1 {
+			_, _ = w.Write([]byte(`{"data":[{"embedding":[1,0]}]}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"data":[{"embedding":[0,1]}]}`))
+	}))
+	t.Cleanup(server.Close)
+	embedBaseURL = server.URL
+	oldRevision := time.Date(2026, 8, 3, 7, 0, 0, 0, time.UTC)
+	newRevision := oldRevision.Add(time.Second)
+	mock.ExpectQuery("SELECT title, content, file_mtime FROM documents").WithArgs("note").
+		WillReturnRows(sqlmock.NewRows([]string{"title", "content", "file_mtime"}).AddRow("Old", "body", oldRevision))
+	mock.ExpectExec("INSERT INTO embeddings").WithArgs("note", sqlmock.AnyArg(), oldRevision).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectQuery("SELECT title, content, file_mtime FROM documents").WithArgs("note").
+		WillReturnRows(sqlmock.NewRows([]string{"title", "content", "file_mtime"}).AddRow("New", "body", newRevision))
+	mock.ExpectExec("INSERT INTO embeddings").WithArgs("note", sqlmock.AnyArg(), newRevision).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+
+	if err := doEmbed("note", server.Client()); err != nil {
+		t.Fatal(err)
+	}
+	mu.RLock()
+	vector := append([]float32(nil), embedIndex["note"]...)
+	mu.RUnlock()
+	if !reflect.DeepEqual(vector, []float32{0, 1}) {
+		t.Fatalf("vector = %v, want latest revision [0 1]", vector)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestReadEmbeddingIndexFromDBBuildsValidatedSnapshot(t *testing.T) {
+	mock := withMockDatabase(t)
 	mock.ExpectQuery("SELECT e.slug, e.embedding FROM embeddings").
 		WillReturnRows(sqlmock.NewRows([]string{"slug", "embedding"}).
 			AddRow("valid", encodeVec([]float32{1, 2})).
 			AddRow("invalid", []byte{1, 2, 3}))
 
-	loadEmbeddingsFromDB()
-	mu.RLock()
-	valid := append([]float32(nil), embedIndex["valid"]...)
-	_, oldExists := embedIndex["old"]
-	_, invalidExists := embedIndex["invalid"]
-	mu.RUnlock()
-	if len(valid) != 2 || oldExists || invalidExists {
-		t.Fatalf("embedding projection = valid:%v old:%v invalid:%v", valid, oldExists, invalidExists)
+	snapshot, err := readEmbeddingIndexFromDB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	valid := snapshot["valid"]
+	_, invalidExists := snapshot["invalid"]
+	if len(valid) != 2 || invalidExists {
+		t.Fatalf("embedding snapshot = valid:%v invalid:%v", valid, invalidExists)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)
