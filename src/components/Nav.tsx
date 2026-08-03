@@ -1,24 +1,36 @@
 import Link from "next/link";
-import { Flame } from "lucide-react";
+import {
+  Files,
+  Flame,
+  Languages,
+  Orbit,
+  Sparkles,
+  type LucideIcon,
+} from "lucide-react";
 import { SearchBar } from "./SearchBar";
+import { ThemePicker } from "./ThemePicker";
 
 type NavProps = {
   active?: "documents" | "sparks" | "translations" | "universe";
 };
 
 function tabClass(active: boolean): string {
-  return `relative inline-flex min-h-9 items-center px-1 text-sm font-medium transition-colors ${
+  return `relative inline-flex min-h-11 min-w-11 items-center justify-center gap-1.5 px-3 text-sm font-medium transition-colors sm:min-h-9 sm:min-w-0 sm:px-1 ${
     active
       ? "text-stone-900 after:absolute after:inset-x-1 after:-bottom-[13px] after:h-0.5 after:rounded-full after:bg-[var(--accent)]"
       : "text-stone-400 hover:text-stone-700"
   }`;
 }
 
+function NavIcon({ icon: Icon }: { icon: LucideIcon }) {
+  return <Icon size={17} strokeWidth={1.8} aria-hidden="true" />;
+}
+
 export function Nav({ active = "documents" }: NavProps) {
   return (
     <header className="border-b border-stone-200 bg-white">
       <div className="mx-auto flex max-w-[90rem] flex-wrap items-center gap-x-5 gap-y-3 px-4 py-3 sm:px-6">
-        <div className="flex shrink-0 items-center gap-4">
+        <div className="order-1 flex shrink-0 items-center gap-4">
           {process.env.NEXT_PUBLIC_HEARTH_URL && (
             <>
               <a
@@ -47,39 +59,51 @@ export function Nav({ active = "documents" }: NavProps) {
             <span>Markdown Hub</span>
           </Link>
         </div>
-        <nav aria-label="主视图" className="flex shrink-0 items-center gap-4">
+        <nav
+          aria-label="主视图"
+          className="order-3 flex w-full shrink-0 items-center justify-between gap-2 lg:order-2 lg:w-auto lg:justify-start lg:gap-4"
+        >
           <Link
             href="/"
+            aria-label="Documents"
             aria-current={active === "documents" ? "page" : undefined}
             className={tabClass(active === "documents")}
           >
-            Documents
+            <NavIcon icon={Files} />
+            <span className="hidden sm:inline">Documents</span>
           </Link>
           <Link
             href="/sparks"
+            aria-label="Sparks"
             aria-current={active === "sparks" ? "page" : undefined}
             className={tabClass(active === "sparks")}
           >
-            Sparks
+            <NavIcon icon={Sparkles} />
+            <span className="hidden sm:inline">Sparks</span>
           </Link>
           <Link
             href="/translations"
+            aria-label="Translations"
             aria-current={active === "translations" ? "page" : undefined}
             className={tabClass(active === "translations")}
           >
-            Translate
+            <NavIcon icon={Languages} />
+            <span className="hidden sm:inline">Translate</span>
           </Link>
           <Link
             href="/universe"
+            aria-label="Universe"
             aria-current={active === "universe" ? "page" : undefined}
             className={tabClass(active === "universe")}
           >
-            Universe
+            <NavIcon icon={Orbit} />
+            <span className="hidden sm:inline">Universe</span>
           </Link>
         </nav>
-        <div className="ml-auto min-w-[14rem] flex-1 sm:max-w-sm">
+        <div className="order-4 min-w-0 flex-1 basis-full lg:order-3 lg:ml-auto lg:min-w-[14rem] lg:basis-auto lg:max-w-sm">
           <SearchBar />
         </div>
+        <ThemePicker className="order-2 ml-auto lg:order-4 lg:ml-0" />
       </div>
     </header>
   );

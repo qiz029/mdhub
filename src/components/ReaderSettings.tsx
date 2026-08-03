@@ -6,11 +6,9 @@ import {
   FONT_PRESETS,
   FONT_SIZES,
   CONTENT_WIDTHS,
-  THEME_MODES,
   type FontPreset,
   type FontSize,
   type ContentWidth,
-  type ThemeMode,
 } from "@/components/FontProvider";
 
 function OptionRow<T extends string>({
@@ -56,8 +54,6 @@ export function ReaderSettings() {
     setFontSize,
     contentWidth,
     setContentWidth,
-    theme,
-    setTheme,
   } = useFont();
 
   return (
@@ -73,12 +69,6 @@ export function ReaderSettings() {
       <div className="fixed bottom-5 right-5 z-50 flex flex-col items-end gap-2">
         {open && (
           <div className="w-64 space-y-4 rounded-xl border border-stone-200 bg-white p-4 shadow-xl">
-            <OptionRow<ThemeMode>
-              label="主题"
-              options={THEME_MODES}
-              value={theme}
-              onChange={setTheme}
-            />
             <OptionRow<FontPreset>
               label="字体"
               options={FONT_PRESETS}

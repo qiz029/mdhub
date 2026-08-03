@@ -521,7 +521,7 @@ export const UniverseCanvas = forwardRef<
     const themeObserver = new MutationObserver(render);
     themeObserver.observe(document.documentElement, {
       attributes: true,
-      attributeFilter: ["class", "style"],
+      attributeFilter: ["class", "style", "data-theme"],
     });
     const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
     let animationFrame = 0;

@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import "./globals.css";
 import { FontProvider } from "@/components/FontProvider";
+import { THEME_MODES, THEME_PRESETS } from "@/lib/themes";
 
 export const metadata: Metadata = {
   title: "Markdown Hub",
@@ -11,10 +12,23 @@ export const metadata: Metadata = {
   },
 };
 
-// Apply stored reader prefs (theme / font / size / width) before first paint
+// Apply stored reader prefs (theme / mode / font / size / width) before first paint
 // to avoid a flash of the default light, narrow, system-font rendering.
+const VALID_THEME_MODES = JSON.stringify(
+  Object.fromEntries(THEME_MODES.map(({ key }) => [key, 1])),
+);
+const VALID_THEME_PRESETS = JSON.stringify(
+  Object.fromEntries(THEME_PRESETS.map(({ key }) => [key, 1])),
+);
+
 const BOOTSTRAP = `(function(){try{
 var t=localStorage.getItem("mdhub-theme")||"system";
+var ms=${VALID_THEME_MODES};
+if(!ms[t])t="system";
+var p=localStorage.getItem("mdhub-theme-preset")||"paper";
+var ps=${VALID_THEME_PRESETS};
+if(!ps[p])p="paper";
+document.documentElement.dataset.theme=p;
 if(t==="dark"||(t==="system"&&window.matchMedia("(prefers-color-scheme: dark)").matches)){
 document.documentElement.classList.add("dark");}
 var f=localStorage.getItem("mdhub-font");
